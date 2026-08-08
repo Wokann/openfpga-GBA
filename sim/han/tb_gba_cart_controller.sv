@@ -61,15 +61,23 @@ module cart_rom_model (
             gpio_reg[gpio_idx] <= bank3[3:0];
     end
 
-    // EEPROM: tiny model. On A23 falling edge while CS2# is low, the chip
-    // presents the next bit on D0. We return 0 for the first bit and then
-    // toggle a known pattern so the handshake is observable.
-    // EEPROM read-back bit: driven by the model only during an EEPROM
-    // bit-clock (A23 falling edge while CS2# is low and RD#/WR# idle).
+    // EEPROM: tiny model. While CS2# is low and A23 high, each RD# pulse
+    // presents the next bit on D0; each WR# pulse samples D0. We return a
+    // toggling pattern so the read handshake is observable.
+    // eeprom_active distinguishes EEPROM (A23 latched high at CS2# falling
+    // edge) from SRAM accesses so the two don't fight over bank1/bank3.
     reg eeprom_d0_out;
+    reg eeprom_active;
     initial eeprom_d0_out = 1'b0;
-    always @(negedge bank1[7]) begin
-        if (!cs2_n && rd_n && wr_n)
+    initial eeprom_active = 1'b0;
+    always @(negedge cs2_n) begin
+        eeprom_active <= (bank1[7] === 1'b1);
+    end
+    always @(posedge cs2_n) begin
+        eeprom_active <= 1'b0;
+    end
+    always @(negedge rd_n) begin
+        if (!cs2_n && eeprom_active)
             eeprom_d0_out <= ~eeprom_d0_out;
     end
 
@@ -83,7 +91,7 @@ module cart_rom_model (
         end else if (!rd_n && !cs_n) begin
             bank3_drv = rom_dout[7:0];
             bank3_en  = 1'b1;
-        end else if (!cs2_n && cs_n && rd_n && wr_n) begin
+        end else if (!cs2_n && cs_n && eeprom_active && !rd_n && wr_n) begin
             bank3_drv = {7'b0, eeprom_d0_out};
             bank3_en  = 1'b1;
         end else begin
@@ -92,7 +100,7 @@ module cart_rom_model (
         end
     end
     assign bank3 = bank3_en ? bank3_drv : 8'hzz;
-    assign bank1 = (!rd_n && !cs2_n && cs_n) ? sram_dout : 8'hzz;
+    assign bank1 = (!eeprom_active && !rd_n && !cs2_n && cs_n) ? sram_dout : 8'hzz;
     assign bank2 = (!rd_n && !cs_n) ? rom_dout[15:8] : 8'hzz;
 endmodule
 

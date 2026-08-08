@@ -23,10 +23,17 @@
 
 module gba_cart_controller #(
     parameter integer PHI_DIV    = 6,   // clk_sys / PHI
+    parameter integer PHI_ENABLE = 0,   // 0 = PHI pin idle high (default WAITCNT=4317h),
+                                        // 1 = generate PHI at clk_sys/PHI_DIV
+    // Wait-state placeholders, in clk_sys (100 MHz) cycles.
+    // GBATEK default WAITCNT=4317h: ROM N/S = 3/1 waits (access = 1+waits
+    // GBA cycles); SRAM = 8 waits; EEPROM WS2 = 8/8 waits. One GBA cycle
+    // ~= 6 clk_sys cycles, so ROM non-sequential ~= 4*6=24 clk_sys cycles
+    // and SRAM ~= 9*6=54 clk_sys cycles. Tune on real carts.
     parameter integer ROM_WAIT   = 24,  // clk_sys cycles per 16-bit ROM read
-    parameter integer SAVE_WAIT  = 8,   // clk_sys cycles per 8-bit save access
+    parameter integer SAVE_WAIT  = 54,  // clk_sys cycles per 8-bit SRAM/Flash access
     parameter integer ADDR_SETUP = 4,   // clk_sys cycles driving address
-    parameter integer EEPROM_HALF_CYCLE = 4, // clk_sys cycles per A23 half period
+    parameter integer EEPROM_HALF_CYCLE = 4, // clk_sys cycles per RD#/WR# half pulse
     parameter integer RESET_LEN  = 4096
 ) (
     input  wire        clk,
@@ -326,37 +333,42 @@ module gba_cart_controller #(
                     end
                 end
 
-                // ---- EEPROM: bit-serial forward (A23=clk, D0=data, CS2#=cs) ----
-                // The real EEPROM chip parses the bit stream itself. Each CPU
-                // access to the EEPROM region advances one bit: assert CS2#,
-                // pulse A23 (low->high), data on D0 (out) / sampled on D0 (in).
+                // ---- EEPROM: bit-serial forward (CS2#=ROMCS, A23=high,
+                //      RD#/WR# = bit clock, D0 = data) ----
+                // Per GBATEK "GBA Cart Backup EEPROM": during the whole DMA
+                // transfer the cart sees /CS=LOW and A23=HIGH, and each bit is
+                // driven by one 16-bit DMA access (RD# for reads, WR# for
+                // writes), data on AD0. We forward one bit per request.
                 S_EEPROM: begin
+                    // A23 (=bank1[7]) stays HIGH during the whole transfer,
+                    // as on the real GBA bus when addressing 0x0Dxxxxxx.
+                    out_bank1     <= 8'h80;
+                    out_bank1_dir <= 1'b1;
+                    out_bank2_dir <= 1'b0;
+                    cs_n          <= 1'b1;
+                    cs2_n         <= 1'b0;   // ROMCS low for whole transfer
                     if (eeprom_rnw) begin
-                        // Read: drive nothing, pulse A23, sample D0
-                        out_bank1_dir <= 1'b1;
-                        out_bank2_dir <= 1'b0;
+                        // Read bit: RD# low pulse, sample D0 before release.
                         out_bank3_dir <= 1'b0;
-                        cs_n          <= 1'b1;
-                        rd_n          <= 1'b1;
                         wr_n          <= 1'b1;
-                        cs2_n         <= 1'b0;
-                        out_bank1     <= (acc_cnt < EEPROM_HALF_CYCLE) ? 8'h0F : 8'h0D;
-                        if (acc_cnt >= 2*EEPROM_HALF_CYCLE - 1) begin
+                        if (acc_cnt < EEPROM_HALF_CYCLE) begin
+                            rd_n <= 1'b0;
+                        end else if (acc_cnt == EEPROM_HALF_CYCLE) begin
                             eeprom_dout <= cart_tran_bank3[0];
-                            state       <= S_DONE;
+                            rd_n        <= 1'b1;
+                        end
+                        if (acc_cnt >= EEPROM_HALF_CYCLE) begin
+                            state <= S_DONE;
                         end
                     end else begin
-                        // Write: drive D0 with data bit, pulse A23
-                        out_bank1_dir <= 1'b1;
-                        out_bank2_dir <= 1'b0;
-                        out_bank3_dir <= 1'b1;
+                        // Write bit: D0 driven with data, WR# low pulse.
                         out_bank3     <= {7'b0, eeprom_din};
-                        cs_n          <= 1'b1;
+                        out_bank3_dir <= 1'b1;
                         rd_n          <= 1'b1;
-                        wr_n          <= 1'b1;
-                        cs2_n         <= 1'b0;
-                        out_bank1     <= (acc_cnt < EEPROM_HALF_CYCLE) ? 8'h0F : 8'h0D;
-                        if (acc_cnt >= 2*EEPROM_HALF_CYCLE - 1) begin
+                        if (acc_cnt < EEPROM_HALF_CYCLE)
+                            wr_n <= 1'b0;
+                        if (acc_cnt >= EEPROM_HALF_CYCLE) begin
+                            wr_n  <= 1'b1;
                             state <= S_DONE;
                         end
                     end
@@ -434,7 +446,8 @@ module gba_cart_controller #(
     assign cart_tran_bank3_dir = out_bank3_dir;
 
     // bank0 bit layout: [3]=PHI# [2]=WR# [1]=RD# [0]=CS1#
-    assign cart_tran_bank0     = {phi, wr_n, rd_n, cs_n};
+    // GBATEK: default WAITCNT (4317h) disables the PHI terminal output.
+    assign cart_tran_bank0     = {PHI_ENABLE ? phi : 1'b1, wr_n, rd_n, cs_n};
     assign cart_tran_bank0_dir = 1'b1;
 
     // pin30: CS2#/RES# — CS2# active during save/EEPROM accesses, else RES#

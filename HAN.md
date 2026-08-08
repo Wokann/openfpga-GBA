@@ -64,13 +64,21 @@ CI（`.github/workflows/build-branch.yml`）在编译前自动运行。
   - jojolebarjos/gba-cartridge 实测：ROM 访问 CS# 下降沿锁存地址、RD# 下降沿
     取数、RD# 上升沿地址自增；SRAM 数据走 A[23:16]（原实现误放 AD 低字节，
     已修正）
-  - GBATEK（WAITCNT）：SRAM=8clks、EEPROM=8/8clks、ROM 非连续/连续=4/2clks
+  - GBATEK（WAITCNT，默认 4317h）：WS0/ROM=3,1 clks；SRAM=8 clks；
+    WS2/EEPROM=8,8 clks；PHI 终端默认禁用（控制器已按此默认拉高 PHI）
   - DenSinH GBA EEPROM 文档：D0 数据位、A23 时钟、6/14 位地址、64 位块
+  - GBATEK EEPROM 章节（关键修正）：DMA3 传输期间 ROMCS(/CS2#) 保持低、
+    **A23 保持高**，每个位由一次 16 位 DMA 访问（RD#/WR# 脉冲）驱动，数据
+    在 AD0；地址为 6 位（512B）或 14 位（8KB，只用低 10 位）；写后需轮询
+    DFFF00h 的 bit0 直到返回 1（Ready）。控制器已按"CS2# 低 + A23 高 +
+    RD#/WR# 脉冲"实现位转发（早期 A23 脉冲版本已废弃）
+  - GBATEK GPIO 章节：80000C4h=C4 数据/C6 方向/C8 控制（4bit），RTC 经
+    GPIO 3 线串行访问（SCK/SIO/CS），与控制器 16 位 R/W 桥一致
 - **时序参数**（ROM_WAIT/SAVE_WAIT/ADDR_SETUP/EEPROM_HALF_CYCLE）为保守
   占位值，需真机卡带校准
-- **EEPROM 位时钟极性**：A23 上升/下降沿采样的具体极性、D0 建立/保持时间
-  无官方完整时序图（nds-slot2 项目注明 GBA 槽无完整时序图），代码采用
-  低→高脉冲 + D0 提前建立，真机验证后可能需调整极性
+- **EEPROM 位时钟极性**：GBATEK 明确 A23 恒高、位由 RD#/WR# 脉冲驱动，
+  但 RD#/WR# 脉冲宽度、D0 建立/保持时间仍需真机校准（nds-slot2 项目注明
+  GBA 槽无官方完整时序图）
 - **GPIO 实体硬件**：RTC 芯片协议、震动驱动、光传感器、陀螺仪尚未针对
   具体卡带验证
 - 存档类型由 `gba_top` 的 save_sram/save_flash/save_eeprom 信号决定；
