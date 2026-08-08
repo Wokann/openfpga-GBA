@@ -37,9 +37,10 @@ module gba_cart_controller #(
     parameter integer SAVE_WAIT  = 54,  // clk_sys cycles per 8-bit SRAM/Flash access
     parameter integer ADDR_SETUP = 4,   // clk_sys cycles driving address
     // insideGadgets GBxCartRead Part 3 measured the real GBA EEPROM bit
-    // clock at ~600 ns full period (~300 ns half). At 100 MHz that is
-    // ~30 clk_sys per half pulse; keep a little margin.
-    parameter integer EEPROM_HALF_CYCLE = 32, // clk_sys cycles per RD#/WR# half pulse
+    // clock at ~600 ns full period (~300 ns half) on a logic analyser.
+    // Our earlier ~380 ns bit period was too fast for the physical 9853/9854
+    // chip. HALF_CYCLE=50 gives ~620 ns bit period, matching the real bus.
+    parameter integer EEPROM_HALF_CYCLE = 50, // clk_sys cycles per RD#/WR# half pulse
     parameter integer EEPROM_ADDR_SETUP = 4, // clk_sys cycles A23/D0 stable
                                              // before CS# falls (EEPROM)
     parameter integer RELEASE_DELAY = 4,     // clk_sys cycles CS2# stays low
