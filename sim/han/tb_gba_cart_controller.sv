@@ -276,6 +276,33 @@ module tb_gba_cart_controller;
         wait (eeprom_done);
         @(posedge clk);
 
+        // ---- EEPROM session hold: consecutive bits must keep CS2# low / A23 high ----
+        // First bit just completed; session is still open (within timeout).
+        if (cart_tran_pin30 !== 1'b0 || cart_tran_bank1 !== 8'h80) begin
+            $display("FAIL: EEPROM session not held after bit (pin30=%b bank1=%h)",
+                     cart_tran_pin30, cart_tran_bank1);
+            errors = errors + 1;
+        end
+        @(posedge clk);
+        eeprom_req <= 1; eeprom_rnw <= 0; eeprom_din <= 1'b0;
+        @(posedge clk);
+        eeprom_req <= 0;
+        wait (eeprom_done);
+        @(posedge clk);
+        // Session should still be held during the burst.
+        if (cart_tran_pin30 !== 1'b0 || cart_tran_bank1 !== 8'h80) begin
+            $display("FAIL: EEPROM session dropped mid-burst (pin30=%b bank1=%h)",
+                     cart_tran_pin30, cart_tran_bank1);
+            errors = errors + 1;
+        end
+        // Let the session timeout expire, then verify release.
+        repeat (1100) @(posedge clk);
+        if (cart_tran_pin30 !== 1'b1) begin
+            $display("FAIL: EEPROM session not released after timeout (pin30=%b)",
+                     cart_tran_pin30);
+            errors = errors + 1;
+        end
+
         @(posedge clk);
         eeprom_req <= 1; eeprom_rnw <= 1;
         @(posedge clk);

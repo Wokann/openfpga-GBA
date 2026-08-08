@@ -34,6 +34,8 @@ module gba_cart_controller #(
     parameter integer SAVE_WAIT  = 54,  // clk_sys cycles per 8-bit SRAM/Flash access
     parameter integer ADDR_SETUP = 4,   // clk_sys cycles driving address
     parameter integer EEPROM_HALF_CYCLE = 4, // clk_sys cycles per RD#/WR# half pulse
+    parameter integer EEPROM_SESS_TIMEOUT = 1024, // clk_sys cycles without EEPROM
+                                                  // access before releasing CS2#/A23
     parameter integer RESET_LEN  = 4096
 ) (
     input  wire        clk,
@@ -147,6 +149,12 @@ module gba_cart_controller #(
     reg        save_is_write;
     reg [15:0] gpio_abs_addr;      // 0x00C4 + {gpio_addr,1'b0}
     reg [3:0]  gpio_din_r;
+    // EEPROM session: GBATEK requires /CS=LOW and A23=HIGH throughout the
+    // whole DMA3 transfer, not just per-bit. We keep the chip selected for a
+    // short timeout after the last bit; the next bit (DMA continues) reuses
+    // the open session, and the session closes once DMA pauses.
+    reg        eeprom_sess;
+    reg [9:0]  eeprom_sess_cnt;
 
     // Bus output registers
     reg [7:0]  out_bank1, out_bank2, out_bank3;
@@ -174,6 +182,8 @@ module gba_cart_controller #(
             gpio_din_r      <= 4'd0;
             gpio_dout       <= 4'd0;
             gpio_done       <= 1'b0;
+            eeprom_sess     <= 1'b0;
+            eeprom_sess_cnt <= 10'd0;
             out_bank1       <= 8'h00;
             out_bank2       <= 8'h00;
             out_bank3       <= 8'h00;
@@ -200,26 +210,47 @@ module gba_cart_controller #(
                 S_IDLE: begin
                     rd_n  <= 1'b1;
                     cs_n  <= 1'b1;
-                    cs2_n <= 1'b1;
                     wr_n  <= 1'b1;
-                    out_bank1_dir <= 1'b0;
                     out_bank2_dir <= 1'b0;
                     out_bank3_dir <= 1'b0;
 
+                    if (eeprom_sess) begin
+                        // GBATEK: /CS must stay LOW and A23 HIGH for the whole
+                        // DMA3 transfer. Keep the session open while bits keep
+                        // arriving; close it after EEPROM_SESS_TIMEOUT cycles
+                        // of inactivity (DMA finished / paused).
+                        cs2_n         <= 1'b0;
+                        out_bank1     <= 8'h80;   // A23 = 1
+                        out_bank1_dir <= 1'b1;
+                        if (eeprom_sess_cnt == EEPROM_SESS_TIMEOUT - 1) begin
+                            eeprom_sess <= 1'b0;   // release next cycle
+                        end else begin
+                            eeprom_sess_cnt <= eeprom_sess_cnt + 1'b1;
+                        end
+                    end else begin
+                        cs2_n         <= 1'b1;
+                        out_bank1_dir <= 1'b0;
+                    end
+
                     if (rd_req) begin
+                        eeprom_sess     <= 1'b0;   // other access: close session
                         byte_addr <= {rd_addr, 2'b00};
                         word_idx  <= 2'd0;
                         acc_cnt   <= 8'd0;
                         state     <= S_ROM_CS;
                     end else if (save_req) begin
+                        eeprom_sess     <= 1'b0;
                         save_addr_r   <= save_addr;
                         save_is_write <= ~save_rnw;
                         acc_cnt       <= 8'd0;
                         state         <= S_SRAM;
                     end else if (eeprom_req) begin
-                        acc_cnt   <= 8'd0;
-                        state     <= S_EEPROM;
+                        eeprom_sess     <= 1'b1;   // (re)open EEPROM session
+                        eeprom_sess_cnt <= 10'd0;
+                        acc_cnt         <= 8'd0;
+                        state           <= S_EEPROM;
                     end else if (gpio_req) begin
+                        eeprom_sess     <= 1'b0;
                         gpio_abs_addr <= {8'h00, 2'b00, gpio_addr, 1'b0} + 16'h00C4;
                         gpio_din_r    <= gpio_din;
                         acc_cnt       <= 8'd0;
@@ -419,11 +450,19 @@ module gba_cart_controller #(
                 S_DONE: begin
                     rd_n  <= 1'b1;
                     cs_n  <= 1'b1;
-                    cs2_n <= 1'b1;
                     wr_n  <= 1'b1;
-                    out_bank1_dir <= 1'b0;
                     out_bank2_dir <= 1'b0;
                     out_bank3_dir <= 1'b0;
+                    if (eeprom_sess) begin
+                        // Keep /CS LOW and A23 HIGH across consecutive EEPROM
+                        // bit accesses (GBATEK requirement for DMA3).
+                        cs2_n         <= 1'b0;
+                        out_bank1     <= 8'h80;
+                        out_bank1_dir <= 1'b1;
+                    end else begin
+                        cs2_n         <= 1'b1;
+                        out_bank1_dir <= 1'b0;
+                    end
                     save_done   <= 1'b1;
                     eeprom_done <= 1'b1;
                     gpio_done   <= 1'b1;
@@ -451,7 +490,7 @@ module gba_cart_controller #(
     assign cart_tran_bank0_dir = 1'b1;
 
     // pin30: CS2#/RES# — CS2# active during save/EEPROM accesses, else RES#
-    assign cart_tran_pin30        = ((state == S_SRAM) || (state == S_EEPROM)) ? cs2_n : res_n;
+    assign cart_tran_pin30        = ((state == S_SRAM) || (state == S_EEPROM) || eeprom_sess) ? cs2_n : res_n;
     assign cart_tran_pin30_dir    = 1'b1;
     assign cart_pin30_pwroff_reset = 1'b0;
 

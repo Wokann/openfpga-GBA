@@ -74,8 +74,9 @@ CI（`.github/workflows/build-branch.yml`）在编译前自动运行。
   - GBATEK EEPROM 章节（关键修正）：DMA3 传输期间 ROMCS(/CS2#) 保持低、
     **A23 保持高**，每个位由一次 16 位 DMA 访问（RD#/WR# 脉冲）驱动，数据
     在 AD0；地址为 6 位（512B）或 14 位（8KB，只用低 10 位）；写后需轮询
-    DFFF00h 的 bit0 直到返回 1（Ready）。控制器已按"CS2# 低 + A23 高 +
-    RD#/WR# 脉冲"实现位转发（早期 A23 脉冲版本已废弃）
+    DFFF00h 的 bit0 直到返回 1（Ready）。控制器实现"EEPROM 会话保持"：
+    CS2#/A23 在一次 DMA 传输的连续位访问之间保持有效，仅在位访问停顿超过
+    EEPROM_SESS_TIMEOUT 后释放（避免物理芯片把每位当作独立传输解析）
   - GBATEK GPIO 章节：80000C4h=C4 数据/C6 方向/C8 控制（4bit），RTC 经
     GPIO 3 线串行访问（SCK/SIO/CS），与控制器 16 位 R/W 桥一致
 - **时序参数**（ROM_WAIT/SAVE_WAIT/ADDR_SETUP/EEPROM_HALF_CYCLE）为保守
