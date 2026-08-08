@@ -1194,11 +1194,12 @@ begin
                      rotate_data    <= (others => '0');
                      state          <= rotate;
                      if (EEPROM_ext_dout = '1') then
-                        if (adr_save(1) = '1') then
-                           rotate_data(16) <= '1';
-                        else
-                           rotate_data(0) <= '1'; 
-                        end if;
+                        -- HAN 迂回：DMA 源地址递增（0x0D000000, 0x0D000002,
+                        -- ...），奇偶地址交替。同时置 bit0 和 bit16，确保
+                        -- ROTATE 按 return_rotate（"00" 或 "10"）返回时
+                        -- 低 16 位始终携带本次读到的数据位。
+                        rotate_data(0)  <= '1';
+                        rotate_data(16) <= '1';
                      end if;
                   else
                      mem_bus_done <= '1';
