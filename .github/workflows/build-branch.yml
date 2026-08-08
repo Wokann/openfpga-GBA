@@ -3,6 +3,15 @@ name: Build
 on:
   push:
     branches: ['**']
+    # Only run the (expensive) Quartus build when relevant sources change.
+    # Documentation-only commits skip CI entirely.
+    paths:
+      - 'src/fpga/**'
+      - 'pkg/**'
+      - 'sim/**'
+      - '.github/workflows/**'
+      - 'generate.tcl'
+      - 'scripts/**'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -25,6 +34,21 @@ jobs:
           vvp tb_cart.vvp
           iverilog -g2012 -o tb_mux.vvp ../../src/fpga/han/gba_cart_controller.sv ../../src/fpga/han/rom_source_mux.sv tb_rom_source_mux.sv
           vvp tb_mux.vvp
+
+      # Restore the previous Quartus database so Smart Recompile can skip
+      # unchanged stages (IP generation, unchanged fitter work). A full
+      # build takes ~23 min on the free runner; small RTL changes should be
+      # meaningfully faster with the cache. Key changes when RTL changes;
+      # restore-keys always pulls the most recent database for incrementality.
+      - name: Cache Quartus incremental database
+        uses: actions/cache@v4
+        with:
+          path: |
+            src/fpga/build/db
+            src/fpga/build/incremental_db
+          key: quartus-db-${{ hashFiles('src/fpga/**', 'generate.tcl', 'scripts/sta_custom_report.tcl') }}
+          restore-keys: |
+            quartus-db-
 
       - name: Compile
         run: docker run --rm -v ${{ github.workspace }}:/build -w /build raetro/quartus:21.1 quartus_sh -t generate.tcl
