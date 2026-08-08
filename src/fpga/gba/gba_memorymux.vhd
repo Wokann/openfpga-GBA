@@ -123,6 +123,10 @@ entity gba_memorymux is
       EEPROM_ext_din        : out    std_logic := '0';   -- write data bit (D0)
       EEPROM_ext_dout       : in     std_logic := '0';   -- read data bit (D0)
       EEPROM_ext_done       : in     std_logic := '0';   -- bit access complete
+      -- HAN: 迂回汉化 - save (SRAM/Flash) 写访问透传给实体卡带，
+      -- 跳过内部 Flash 命令模拟（否则命令序列被内部状态机消费，
+      -- 实体 Flash 永远收不到编程命令）
+      save_cart_mode        : in     std_logic := '0';
       
       tilt                 : in     std_logic;
       AnalogTiltX          : in     signed(7 downto 0);
@@ -1335,10 +1339,16 @@ begin
                end if;
             
             when FLASHSRAMWRITEDECIDE1 =>
-               state           <= FLASHSRAMWRITEDECIDE2;
-               flashSRamdecide <= '1';
-               if (flashSRamdecide = '0' and adr_save = x"e005555") then
-                   flashNotSRam <= '1';
+               if (save_cart_mode = '1') then
+                  -- 迂回汉化：写访问直接透传卡带（SRAM/Flash 由实体芯片
+                  -- 自行解析命令），不进入内部 Flash 命令模拟。
+                  state <= SRAMWRITE;
+               else
+                  state           <= FLASHSRAMWRITEDECIDE2;
+                  flashSRamdecide <= '1';
+                  if (flashSRamdecide = '0' and adr_save = x"e005555") then
+                      flashNotSRam <= '1';
+                  end if;
                end if;
                
             when FLASHSRAMWRITEDECIDE2 =>
@@ -1357,11 +1367,21 @@ begin
                state        <= WAIT_PROCBUS;
             
             when FLASHWRITE =>
-               -- only default, maybe overwritten
-               state        <= IDLE;
-               mem_bus_done <= '1';
-            
-               case (flashState) is
+               if (save_cart_mode = '1') then
+                  -- 迂回汉化：命令序列与数据全部透传给卡带 Flash，
+                  -- 实体芯片自己执行命令（含 bank 切换/编程/擦除）。
+                  bus_out_Din  <= x"000000" & Dout_save(7 downto 0);
+                  bus_out_Adr  <= std_logic_vector(to_unsigned(Softmap_GBA_FLASH_ADDR, busadr_bits) + unsigned(adr_save(15 downto 0)));
+                  bus_out_rnw  <= '0';
+                  bus_out_ena  <= '1';
+                  save_flash   <= '1';
+                  state        <= WAIT_PROCBUS;
+               else
+                  -- only default, maybe overwritten
+                  state        <= IDLE;
+                  mem_bus_done <= '1';
+               
+                  case (flashState) is
                   when FLASH_READ_ARRAY =>
                      if (adr_save(15 downto 0) = x"5555" and Dout_save(7 downto 0) = x"AA") then
                            flashState <= FLASH_CMD_1;
@@ -1466,6 +1486,7 @@ begin
                   when others => null;
                    
                end case;
+               end if;
                
             when FLASH_WRITEBLOCK =>
                bus_out_Din       <= x"000000" & flash_savedata;

@@ -55,6 +55,8 @@ entity gba_top is
       EEPROM_ext_din_out    : out    std_logic := '0';             -- write data bit
       EEPROM_ext_dout_in    : in     std_logic := '0';             -- read data bit
       EEPROM_ext_done_in    : in     std_logic := '0';             -- bit access done
+      -- HAN: 迂回汉化 - save 写访问透传实体卡带（SRAM/Flash 命令不过内部模拟）
+      save_cart_mode        : in     std_logic := '0';
       savestate_number      : in     integer;
       -- RTC
       RTC_timestampNew      : in     std_logic;                     -- new current timestamp from system
@@ -673,6 +675,7 @@ begin
       EEPROM_ext_din       => EEPROM_ext_din_int,
       EEPROM_ext_dout      => EEPROM_ext_dout_in,
       EEPROM_ext_done      => EEPROM_ext_done_in,
+      save_cart_mode       => save_cart_mode,
       
       tilt                 => '0',
       AnalogTiltX          => (others => '0'),

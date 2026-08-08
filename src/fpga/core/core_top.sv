@@ -1767,6 +1767,7 @@ gba_top #(
     .EEPROM_ext_din_out  ( gba_eeprom_din_w ),
     .EEPROM_ext_dout_in  ( gba_eeprom_dout_w ),
     .EEPROM_ext_done_in  ( gba_eeprom_done_w ),
+    .save_cart_mode      ( han_save_cart_mode ),
     // SDRAM (ROM reads — muxed with staging in sdram_pocket section)
     .sdram_read_ena      ( sdram_read_req_gba ),
     .sdram_read_done     ( ss_serving_active ? 1'b0 : rom_rd_ready ),

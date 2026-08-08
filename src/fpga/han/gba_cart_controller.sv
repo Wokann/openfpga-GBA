@@ -495,13 +495,18 @@ module gba_cart_controller #(
                 S_GPIO_R: begin
                     out_bank2_dir <= 1'b0;
                     out_bank3_dir <= 1'b0;
-                    rd_n          <= 1'b0;
-                    if (acc_cnt == SAVE_WAIT - 1) begin
+                    if (acc_cnt < SAVE_WAIT) begin
+                        rd_n <= 1'b0;
+                        acc_cnt <= acc_cnt + 1'b1;
+                    end else if (acc_cnt == SAVE_WAIT) begin
+                        rd_n <= 1'b1;   // RD# rising edge
+                        acc_cnt <= acc_cnt + 1'b1;
+                    end else begin
+                        // Sample AFTER RD# rose (cart GPIO data is stable
+                        // after the read strobe, same as EEPROM).
                         gpio_dout <= cart_tran_bank3[3:0];
                         acc_cnt   <= 8'd0;
                         state     <= S_DONE;
-                    end else begin
-                        acc_cnt <= acc_cnt + 1'b1;
                     end
                 end
 

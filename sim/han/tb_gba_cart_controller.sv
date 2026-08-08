@@ -95,7 +95,7 @@ module cart_rom_model (
             // because ROM also sees CS# low + RD# pulses.
             bank3_drv = {7'b0, eeprom_d0_out};
             bank3_en  = 1'b1;
-        end else if (!rd_n && !cs_n && gpio_sel) begin
+        end else if (!cs_n && gpio_sel && wr_n) begin
             bank3_drv = {4'b0, gpio_reg[gpio_idx]};
             bank3_en  = 1'b1;
         end else if (!rd_n && !cs_n) begin
