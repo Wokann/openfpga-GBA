@@ -40,6 +40,14 @@ entity gba_top is
       maxpixels             : in     std_logic;                    -- limit pixels per line
       specialmodule         : in     std_logic;                    -- 0 = off, 1 = use gamepak GPIO Port at address 0x080000C4..0x080000C8
       -- solar/tilt/rumble removed to save ALMs (only affects <2% of games)
+      -- HAN: expose GPIO bus so core_top can bridge to physical cart hardware
+      GPIO_cart_mode        : in     std_logic := '0';             -- 1 = GPIO answered by core_top (cart), 0 = internal sim
+      GPIO_readEna_out      : out    std_logic;                    -- GPIO read request pulse
+      GPIO_writeEna_out     : out    std_logic;                    -- GPIO write request pulse
+      GPIO_addr_out         : out    std_logic_vector(1 downto 0); -- 0..2 -> 0x080000C4..0x080000C8
+      GPIO_Dout_out         : out    std_logic_vector(3 downto 0); -- write data D3..D0
+      GPIO_Din_in           : in     std_logic_vector(3 downto 0) := (others => '0'); -- read data
+      GPIO_done_in          : in     std_logic := '0';             -- read/write done pulse
       savestate_number      : in     integer;
       -- RTC
       RTC_timestampNew      : in     std_logic;                     -- new current timestamp from system
@@ -233,6 +241,10 @@ architecture arch of gba_top is
    signal GPIO_Dout            : std_logic_vector(3 downto 0);
    signal GPIO_writeEna        : std_logic;
    signal GPIO_addr            : std_logic_vector(1 downto 0);
+   signal GPIO_Din_sim         : std_logic_vector(3 downto 0);
+   signal GPIO_done_sim        : std_logic;
+   signal GPIO_Din_muxed       : std_logic_vector(3 downto 0);
+   signal GPIO_done_muxed      : std_logic;
    
    signal gbaon                : std_logic := '0';
    signal gpu_out_active       : std_logic;
@@ -482,6 +494,14 @@ begin
    savestate_savestate <= save_state;
    savestate_loadstate <= load_state;
    savestate_address   <= Softmap_SaveState_ADDR;
+
+   -- HAN: expose GPIO request bus to core_top (physical cart hardware mode)
+   GPIO_readEna_out  <= GPIO_readEna;
+   GPIO_writeEna_out <= GPIO_writeEna;
+   GPIO_addr_out     <= GPIO_addr;
+   GPIO_Dout_out     <= GPIO_Dout;
+   GPIO_Din_muxed    <= GPIO_Din_in  when GPIO_cart_mode = '1' else GPIO_Din_sim;
+   GPIO_done_muxed   <= GPIO_done_in when GPIO_cart_mode = '1' else GPIO_done_sim;
    
    igba_gpioRTCSolarGyro : entity work.gba_gpioRTCSolarGyro
    port map
@@ -493,8 +513,8 @@ begin
       savestate_bus        => savestate_bus,
                                          
       GPIO_readEna         => GPIO_readEna, 
-      GPIO_done            => GPIO_done,   
-      GPIO_Din             => GPIO_Din,     
+      GPIO_done            => GPIO_done_sim,
+      GPIO_Din             => GPIO_Din_sim,
       GPIO_Dout            => GPIO_Dout,    
       GPIO_writeEna        => GPIO_writeEna,
       GPIO_addr            => GPIO_addr,
@@ -624,8 +644,8 @@ begin
 
       specialmodule        => specialmodule,
       GPIO_readEna         => GPIO_readEna,
-      GPIO_done            => GPIO_done,    
-      GPIO_Din             => GPIO_Din,     
+      GPIO_done            => GPIO_done_muxed,
+      GPIO_Din             => GPIO_Din_muxed,
       GPIO_Dout            => GPIO_Dout,    
       GPIO_writeEna        => GPIO_writeEna,
       GPIO_addr            => GPIO_addr,    

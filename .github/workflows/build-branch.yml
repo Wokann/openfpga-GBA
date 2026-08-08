@@ -16,6 +16,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Run HAN RTL tests (Icarus Verilog)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y iverilog
+          cd sim/han
+          iverilog -g2012 -o tb_cart.vvp ../../src/fpga/han/gba_cart_controller.sv ../../src/fpga/han/rom_source_mux.sv tb_gba_cart_controller.sv
+          vvp tb_cart.vvp
+          iverilog -g2012 -o tb_mux.vvp ../../src/fpga/han/gba_cart_controller.sv ../../src/fpga/han/rom_source_mux.sv tb_rom_source_mux.sv
+          vvp tb_mux.vvp
+
       - name: Compile
         run: docker run --rm -v ${{ github.workspace }}:/build -w /build raetro/quartus:21.1 quartus_sh -t generate.tcl
 

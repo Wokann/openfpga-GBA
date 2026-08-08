@@ -899,6 +899,8 @@ set_global_assignment -name VHDL_FILE ../gba/gba_timer_module.vhd
 set_global_assignment -name VHDL_FILE ../gba/gba_savestates.vhd
 set_global_assignment -name VHDL_FILE ../gba/gba_gpioRTCSolarGyro.vhd
 set_global_assignment -name VHDL_FILE ../gba/cache.vhd
+set_global_assignment -name SYSTEMVERILOG_FILE ../han/gba_cart_controller.sv
+set_global_assignment -name SYSTEMVERILOG_FILE ../han/rom_source_mux.sv
 
 set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to bridge_1wire
 set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to bridge_spiclk

@@ -230,21 +230,101 @@ assign port_ir_rx_disable = 1;
 // bridge endianness
 assign bridge_endian_little = 0;
 
-// cart is unused, so set all level translators accordingly
-// directions are 0:IN, 1:OUT
-assign cart_tran_bank3 = 8'hzz;
-assign cart_tran_bank3_dir = 1'b0;
-assign cart_tran_bank2 = 8'hzz;
-assign cart_tran_bank2_dir = 1'b0;
-assign cart_tran_bank1 = 8'hzz;
-assign cart_tran_bank1_dir = 1'b0;
-assign cart_tran_bank0 = 4'hf;
-assign cart_tran_bank0_dir = 1'b1;
-assign cart_tran_pin30 = 1'b0;
-assign cart_tran_pin30_dir = 1'bz;
-assign cart_pin30_pwroff_reset = 1'b0;
-assign cart_tran_pin31 = 1'bz;
-assign cart_tran_pin31_dir = 1'b0;
+// ---- HAN: GBA cartridge slot controller ----
+// Modes:
+//   han_rom_cart_mode  : 0 = SD ROM, 1 = cartridge ROM (外挂汉化, future)
+//   han_save_cart_mode : 0 = SD save (PSRAM), 1 = cartridge save (迂回汉化)
+//   han_gpio_cart_mode : 0 = internal sim, 1 = cartridge hardware (迂回汉化)
+wire        han_rom_cart_mode;
+wire        han_save_cart_mode;
+wire        han_gpio_cart_mode;
+assign han_rom_cart_mode  = 1'b0;   // TODO(CHIP32): switch from IO bridge
+assign han_save_cart_mode = 1'b1;   // 迂回汉化：存档读写走卡带槽实体卡带
+assign han_gpio_cart_mode = 1'b1;   // 迂回汉化：RTC/震动/太阳/陀螺走卡带硬件
+
+wire        han_cart_rd_req;
+wire [24:0] han_cart_rd_addr;
+wire        han_cart_rd_ready;
+wire [31:0] han_cart_rd_data;
+wire [31:0] han_cart_rd_data_second;
+
+wire        han_cart_save_req;
+wire [16:0] han_cart_save_addr;
+wire        han_cart_save_rnw;
+wire [7:0]  han_cart_save_din;
+wire [7:0]  han_cart_save_dout;
+wire        han_cart_save_done;
+wire [1:0]  han_cart_save_type;
+
+wire        han_cart_gpio_req;
+wire        han_cart_gpio_rnw;
+wire [1:0]  han_cart_gpio_addr;
+wire [3:0]  han_cart_gpio_din;
+wire [3:0]  han_cart_gpio_dout;
+wire        han_cart_gpio_done;
+
+wire        han_cart_present;
+
+gba_cart_controller #(
+    .PHI_DIV   (6),
+    .ROM_WAIT  (24),
+    .ADDR_SETUP(4)
+) u_gba_cart (
+    .clk                    ( clk_sys ),
+    .reset_n                ( pll_core_locked ),
+    .cart_tran_bank2        ( cart_tran_bank2 ),
+    .cart_tran_bank2_dir    ( cart_tran_bank2_dir ),
+    .cart_tran_bank3        ( cart_tran_bank3 ),
+    .cart_tran_bank3_dir    ( cart_tran_bank3_dir ),
+    .cart_tran_bank1        ( cart_tran_bank1 ),
+    .cart_tran_bank1_dir    ( cart_tran_bank1_dir ),
+    .cart_tran_bank0        ( cart_tran_bank0 ),
+    .cart_tran_bank0_dir    ( cart_tran_bank0_dir ),
+    .cart_tran_pin30        ( cart_tran_pin30 ),
+    .cart_tran_pin30_dir    ( cart_tran_pin30_dir ),
+    .cart_pin30_pwroff_reset( cart_pin30_pwroff_reset ),
+    .cart_tran_pin31        ( cart_tran_pin31 ),
+    .cart_tran_pin31_dir    ( cart_tran_pin31_dir ),
+    .rd_req                 ( han_cart_rd_req ),
+    .rd_addr                ( han_cart_rd_addr ),
+    .rd_data                ( han_cart_rd_data ),
+    .rd_data_second         ( han_cart_rd_data_second ),
+    .rd_ready               ( han_cart_rd_ready ),
+    .save_req               ( han_cart_save_req ),
+    .save_addr              ( han_cart_save_addr ),
+    .save_rnw               ( han_cart_save_rnw ),
+    .save_din               ( han_cart_save_din ),
+    .save_dout              ( han_cart_save_dout ),
+    .save_done              ( han_cart_save_done ),
+    .save_type              ( han_cart_save_type ),
+    .gpio_req               ( han_cart_gpio_req ),
+    .gpio_rnw               ( han_cart_gpio_rnw ),
+    .gpio_addr              ( han_cart_gpio_addr ),
+    .gpio_din               ( han_cart_gpio_din ),
+    .gpio_dout              ( han_cart_gpio_dout ),
+    .gpio_done              ( han_cart_gpio_done ),
+    .cart_present           ( han_cart_present ),
+    .err_count              (  )
+);
+
+// ---- HAN GPIO / save-type bridge signals ----
+wire        gba_gpio_read_ena, gba_gpio_write_ena, gba_gpio_done_in_w;
+wire [1:0]  gba_gpio_addr;
+wire [3:0]  gba_gpio_dout_w, gba_gpio_din_w;
+wire        gba_save_sram, gba_save_flash, gba_save_eeprom;
+
+// GPIO requests from gba_top -> cartridge controller
+assign han_cart_gpio_req  = gba_gpio_read_ena | gba_gpio_write_ena;
+assign han_cart_gpio_rnw  = gba_gpio_read_ena;
+assign han_cart_gpio_addr = gba_gpio_addr;
+assign han_cart_gpio_din  = gba_gpio_dout_w;
+
+// Responses back to gba_top (meaningful only in cart mode)
+assign gba_gpio_din_w     = han_gpio_cart_mode ? han_cart_gpio_dout : 4'd0;
+assign gba_gpio_done_in_w = han_gpio_cart_mode ? han_cart_gpio_done : 1'b0;
+
+// Save protocol select: EEPROM > Flash > SRAM
+assign han_cart_save_type = gba_save_eeprom ? 2'd2 : (gba_save_flash ? 2'd1 : 2'd0);
 
 // ---- Link Cable ----
 // Supported: 2-player multi-player mode on SD/SC with SO/SI terminal detect.
@@ -594,6 +674,7 @@ localparam BUS_EWRAM_WAIT = 3'd1;  // Wait for SDRAM ch2 to complete EWRAM acces
 localparam BUS_DONE       = 3'd5;
 localparam BUS_SAVE_REQ   = 3'd6;  // Issue single-byte PSRAM access (saves, packed)
 localparam BUS_SAVE_WAIT  = 3'd7;  // Wait for PSRAM to complete (saves, packed)
+localparam BUS_CART_SAVE  = 3'd2;  // HAN: wait for cartridge save access
 
 reg  [2:0]  bus_state;
 reg         bus_is_write;
@@ -638,6 +719,13 @@ always @(posedge clk_sys) begin
                         sdram_ch2_din <= bus_out_Din;
                     end
                     bus_state <= BUS_EWRAM_WAIT;
+                end else if (han_save_cart_mode) begin
+                    // HAN 迂回汉化: route save access to the physical cartridge
+                    han_cart_save_req   <= 1'b1;
+                    han_cart_save_addr  <= bus_out_Adr[16:0];
+                    han_cart_save_rnw   <= bus_out_rnw;
+                    han_cart_save_din   <= bus_out_Din[7:0];
+                    bus_state <= BUS_CART_SAVE;
                 end else begin
                     // Save -> die 1: packed byte access via PSRAM
                     // GBA core uses byte addr as DWORD addr (1 byte per DWORD).
@@ -647,6 +735,16 @@ always @(posedge clk_sys) begin
                     bus_byte_sel  <= bus_out_Adr[0];
                     bus_state <= BUS_SAVE_REQ;
                 end
+            end
+        end
+
+        // ---- HAN: cartridge save path (迂回汉化) ----
+        BUS_CART_SAVE: begin
+            han_cart_save_req <= 1'b0;
+            if (han_cart_save_done) begin
+                if (~bus_is_write)
+                    bus_out_rdata <= {24'd0, han_cart_save_dout};
+                bus_state <= BUS_DONE;
             end
         end
 
@@ -751,10 +849,38 @@ wire        sdram_wr_req_mux  = rom_loader_wr    | ss_sdram_wr_req;
 wire [24:0] sdram_wr_addr_mux = ss_sdram_wr_req  ? ss_sdram_wr_addr : rom_loader_addr[25:1];
 wire [15:0] sdram_wr_data_mux = ss_sdram_wr_req  ? ss_sdram_wr_data : rom_loader_data;
 
-// Mux SDRAM ch1 read port: ROM reads OR staging reads
+// HAN: route gba_top ROM reads to SDRAM (SD mode) or cartridge (外挂 mode)
+wire        rom_rd_ready;
+wire [31:0] rom_rd_data;
+wire [31:0] rom_rd_data_second;
+
+wire        sdram_rd_req_from_mux;
+wire [24:0] sdram_rd_addr_from_mux;
+
+rom_source_mux u_rom_mux (
+    .clk                 ( clk_sys ),
+    .cart_mode           ( han_rom_cart_mode ),
+    .gba_rd_req          ( sdram_read_req_gba ),
+    .gba_rd_addr         ( sdram_read_addr_gba ),
+    .gba_rd_ready        ( rom_rd_ready ),
+    .gba_rd_data         ( rom_rd_data ),
+    .gba_rd_data_second  ( rom_rd_data_second ),
+    .sdram_rd_req        ( sdram_rd_req_from_mux ),
+    .sdram_rd_addr       ( sdram_rd_addr_from_mux ),
+    .sdram_rd_ready      ( sdram_rd_ready ),
+    .sdram_rd_data       ( sdram_rd_data ),
+    .sdram_rd_data_second( sdram_rd_data_second ),
+    .cart_rd_req         ( han_cart_rd_req ),
+    .cart_rd_addr        ( han_cart_rd_addr ),
+    .cart_rd_ready       ( han_cart_rd_ready ),
+    .cart_rd_data        ( han_cart_rd_data ),
+    .cart_rd_data_second ( han_cart_rd_data_second )
+);
+
+// Mux SDRAM ch1 read port: ROM reads (via rom_source_mux) OR staging reads
 // During Phase 2 core is paused (sleep_savestate), no ROM reads conflict.
-wire        sdram_rd_req_mux  = ss_serving_active ? ss_sdram_rd_req     : sdram_read_req_gba;
-wire [24:0] sdram_rd_addr_mux = ss_serving_active ? ss_sdram_rd_addr    : sdram_read_addr_gba;
+wire        sdram_rd_req_mux  = ss_serving_active ? ss_sdram_rd_req     : sdram_rd_req_from_mux;
+wire [24:0] sdram_rd_addr_mux = ss_serving_active ? ss_sdram_rd_addr    : sdram_rd_addr_from_mux;
 
 wire sdram_ready;
 wire sdram_wr_pending;
@@ -1602,12 +1728,20 @@ gba_top #(
     .RTC_timestampOut    ( rtc_timestamp_out ),
     .RTC_savedtimeOut    ( rtc_savedtime_out ),
     .RTC_inuse           ( rtc_inuse ),
+    // HAN GPIO bridge (cart hardware mode)
+    .GPIO_cart_mode      ( han_gpio_cart_mode ),
+    .GPIO_readEna_out    ( gba_gpio_read_ena ),
+    .GPIO_writeEna_out   ( gba_gpio_write_ena ),
+    .GPIO_addr_out       ( gba_gpio_addr ),
+    .GPIO_Dout_out       ( gba_gpio_dout_w ),
+    .GPIO_Din_in         ( gba_gpio_din_w ),
+    .GPIO_done_in        ( gba_gpio_done_in_w ),
     // SDRAM (ROM reads — muxed with staging in sdram_pocket section)
     .sdram_read_ena      ( sdram_read_req_gba ),
-    .sdram_read_done     ( ss_serving_active ? 1'b0 : sdram_rd_ready ),
+    .sdram_read_done     ( ss_serving_active ? 1'b0 : rom_rd_ready ),
     .sdram_read_addr     ( sdram_read_addr_gba ),
-    .sdram_read_data     ( sdram_rd_data ),
-    .sdram_second_dword  ( sdram_rd_data_second ),
+    .sdram_read_data     ( rom_rd_data ),
+    .sdram_second_dword  ( rom_rd_data_second ),
     // External memory (EWRAM + saves via PSRAM)
     .bus_out_Din         ( bus_out_Din ),
     .bus_out_Dout        ( bus_out_Dout ),
@@ -1629,9 +1763,9 @@ gba_top #(
     .bios_wrdata         ( bios_32_data ),
     .bios_wr             ( bios_32_wr ),
     // Save detection outputs (unused — we detect externally)
-    .save_eeprom         (),
-    .save_sram           (),
-    .save_flash          (),
+    .save_eeprom         ( gba_save_eeprom ),
+    .save_sram           ( gba_save_sram ),
+    .save_flash          ( gba_save_flash ),
     .load_done           ( ss_load_done ),
     .savestate_busy      ( ss_busy ),
     .sleep_external      ( ss_loading ),
