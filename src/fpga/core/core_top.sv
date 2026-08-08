@@ -277,11 +277,12 @@ wire        han_cart_present;
 
 gba_cart_controller #(
     .PHI_DIV   (6),
-    .ROM_WAIT  (24),
-    .ADDR_SETUP(4)
+    .ROM_WAIT  (40),
+    .ADDR_SETUP(16)
 ) u_gba_cart (
     .clk                    ( clk_sys ),
     .reset_n                ( pll_core_locked ),
+    .phi_sel                ( gba_phi_sel ),
     .cart_tran_bank2        ( cart_tran_bank2 ),
     .cart_tran_bank2_dir    ( cart_tran_bank2_dir ),
     .cart_tran_bank3        ( cart_tran_bank3 ),
@@ -331,6 +332,8 @@ wire        gba_save_sram, gba_save_flash, gba_save_eeprom;
 wire        gba_eeprom_req_w, gba_eeprom_rnw_w, gba_eeprom_din_w;
 wire        gba_eeprom_dma_w;
 wire        gba_eeprom_dout_w, gba_eeprom_done_w;
+// HAN: WAITCNT PHI terminal select (bit12..11) from gba_top -> cartridge controller
+wire [1:0]  gba_phi_sel;
 
 // GPIO requests from gba_top -> cartridge controller
 assign han_cart_gpio_req  = gba_gpio_read_ena | gba_gpio_write_ena;
@@ -1777,6 +1780,7 @@ gba_top #(
     .EEPROM_ext_dma_out  ( gba_eeprom_dma_w ),
     .EEPROM_ext_dout_in  ( gba_eeprom_dout_w ),
     .EEPROM_ext_done_in  ( gba_eeprom_done_w ),
+    .WAITCNT_phi_out     ( gba_phi_sel ),
     .save_cart_mode      ( han_save_cart_mode ),
     // SDRAM (ROM reads — muxed with staging in sdram_pocket section)
     .sdram_read_ena      ( sdram_read_req_gba ),

@@ -56,6 +56,9 @@ entity gba_top is
       EEPROM_ext_dma_out    : out    std_logic := '0';             -- 1 = DMA3 burst, 0 = CPU poll
       EEPROM_ext_dout_in    : in     std_logic := '0';             -- read data bit
       EEPROM_ext_done_in    : in     std_logic := '0';             -- bit access done
+      -- HAN: expose WAITCNT PHI terminal select (bit12..11) so the cartridge
+      -- controller can drive the physical PHI pin (9853 GPIO/RTC/gyro need it)
+      WAITCNT_phi_out       : out    std_logic_vector(1 downto 0) := (others => '0');
       -- HAN: 迂回汉化 - save 写访问透传实体卡带（SRAM/Flash 命令不过内部模拟）
       save_cart_mode        : in     std_logic := '0';
       savestate_number      : in     integer;
@@ -932,6 +935,8 @@ begin
    iREG_IRP_IE  : entity work.eProcReg_gba generic map (work.pReg_gba_system.IRP_IE ) port map  (clk100, gb_bus, REG_IRP_IE , REG_IRP_IE );
    iREG_IRP_IF  : entity work.eProcReg_gba generic map (work.pReg_gba_system.IRP_IF ) port map  (clk100, gb_bus, IRPFLags   , REG_IRP_IF , IF_written);                                                                                                                   
    iREG_WAITCNT : entity work.eProcReg_gba generic map (work.pReg_gba_system.WAITCNT) port map  (clk100, gb_bus, REG_WAITCNT, REG_WAITCNT, WAITCNT_written);                                                                                                                     
+   -- HAN: forward WAITCNT PHI terminal select to the cartridge controller
+   WAITCNT_phi_out <= REG_WAITCNT(12 downto 11);
    iREG_ISCGB   : entity work.eProcReg_gba generic map (work.pReg_gba_system.ISCGB  ) port map  (clk100, gb_bus, "0");                                                                                                                     
    iREG_IME     : entity work.eProcReg_gba generic map (work.pReg_gba_system.IME    ) port map  (clk100, gb_bus, REG_IME    , REG_IME    );                                                                                                                       
    iREG_POSTFLG : entity work.eProcReg_gba generic map (work.pReg_gba_system.POSTFLG) port map  (clk100, gb_bus, REG_POSTFLG, REG_POSTFLG);

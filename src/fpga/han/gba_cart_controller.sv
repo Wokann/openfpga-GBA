@@ -25,9 +25,7 @@
 `default_nettype none
 
 module gba_cart_controller #(
-    parameter integer PHI_DIV    = 6,   // clk_sys / PHI
-    parameter integer PHI_ENABLE = 0,   // 0 = PHI pin idle high (default WAITCNT=4317h),
-                                        // 1 = generate PHI at clk_sys/PHI_DIV
+    parameter integer PHI_DIV_16M = 6,  // clk_sys / PHI for 16.78MHz PHI output
     // Wait-state placeholders, in clk_sys (100 MHz) cycles.
     // GBATEK default WAITCNT=4317h: ROM N/S = 3/1 waits (access = 1+waits
     // GBA cycles); SRAM = 8 waits; EEPROM WS2 = 8/8 waits. One GBA cycle
@@ -41,7 +39,7 @@ module gba_cart_controller #(
     // Our earlier ~380 ns bit period was too fast for the physical 9853/9854
     // chip. HALF_CYCLE=50 gives ~620 ns bit period, matching the real bus.
     parameter integer EEPROM_HALF_CYCLE = 50, // clk_sys cycles per RD#/WR# half pulse
-    parameter integer EEPROM_ADDR_SETUP = 4, // clk_sys cycles A23/D0 stable
+    parameter integer EEPROM_ADDR_SETUP = 16, // clk_sys cycles A23/D0 stable
                                              // before CS# falls (EEPROM)
     parameter integer RELEASE_DELAY = 4,     // clk_sys cycles CS2# stays low
                                              // after WR#/RD# rise (write
@@ -53,6 +51,13 @@ module gba_cart_controller #(
     input  wire        clk,
     input  wire        reset_n,
 
+    // ---- PHI terminal control (WAITCNT bit12..11, from gba_top) ----
+    // 0 = disabled (pin idle high, GBA default), 1 = 4.19MHz, 2 = 8.38MHz,
+    // 3 = 16.78MHz. The 9853/9854 ROM-chip GPIO (RTC/solar/gyro/rumble carts)
+    // requires a running PHI clock; without it the GPIO registers do not
+    // respond and RTC/gyro/solar peripherals stay dead.
+    input  wire [1:0]  phi_sel,
+
     // ---- Pocket cartridge slot (from core_top) ----
     inout  wire [7:0]  cart_tran_bank2,    // GBA AD[15:8]
     output wire        cart_tran_bank2_dir,
@@ -60,7 +65,7 @@ module gba_cart_controller #(
     output wire        cart_tran_bank3_dir,
     inout  wire [7:0]  cart_tran_bank1,    // GBA A[23:16]
     output wire        cart_tran_bank1_dir,
-    inout  wire [3:0]  cart_tran_bank0,    // [3]=PHI# [2]=WR# [1]=RD# [0]=CS1#
+    inout  wire [7:4]  cart_tran_bank0,    // [7]=PHI# [6]=WR# [5]=RD# [4]=CS1#
     output wire        cart_tran_bank0_dir,
     inout  wire        cart_tran_pin30,    // GBA CS2#/RES#
     output wire        cart_tran_pin30_dir,
@@ -107,16 +112,26 @@ module gba_cart_controller #(
 );
 
     // ------------------------------------------------------------------
-    // PHI generation (bank0[3])
+    // PHI generation (bank0[7])
     // ------------------------------------------------------------------
-    reg [2:0] phi_cnt;
-    wire phi = (phi_cnt < (PHI_DIV / 2));
+    // WAITCNT bit12..11 selects the PHI frequency. clk_sys ~100.66 MHz:
+    //   00 = disabled (idle high), 01 = 4.19MHz (div 24),
+    //   10 = 8.38MHz (div 12),      11 = 16.78MHz (div 6).
+    wire [4:0] phi_div =
+        (phi_sel == 2'd1) ? 5'd24 :
+        (phi_sel == 2'd2) ? 5'd12 :
+        (phi_sel == 2'd3) ? PHI_DIV_16M[4:0] : 5'd1;
+    reg [4:0] phi_cnt;
+    wire phi_enable = (phi_sel != 2'd0);
+    wire phi = phi_enable && (phi_cnt < (phi_div >> 1));
 
     always @(posedge clk or negedge reset_n) begin
         if (!reset_n)
-            phi_cnt <= 3'd0;
-        else if (phi_cnt == PHI_DIV - 1)
-            phi_cnt <= 3'd0;
+            phi_cnt <= 5'd0;
+        else if (!phi_enable || phi_div <= 1)
+            phi_cnt <= 5'd0;
+        else if (phi_cnt == phi_div - 1)
+            phi_cnt <= 5'd0;
         else
             phi_cnt <= phi_cnt + 1'b1;
     end
@@ -333,13 +348,24 @@ module gba_cart_controller #(
                 end
 
                 S_ROM_DATA: begin
-                    if (acc_cnt == 0) begin
+                    if (acc_cnt < ADDR_SETUP) begin
+                        // CS# has fallen; hold the address on AD[15:0] for the
+                        // latch hold time before releasing it to data.
+                        rd_n <= 1'b1;
+                        acc_cnt <= acc_cnt + 1'b1;
+                    end else if (acc_cnt == ADDR_SETUP) begin
                         // Release AD bus (data comes from cart on AD[15:0])
+                        // and start the read strobe.
                         out_bank2_dir <= 1'b0;
                         out_bank3_dir <= 1'b0;
                         rd_n          <= 1'b0;   // ~RD falling edge fetches data
-                    end
-                    if (acc_cnt == ROM_WAIT - 1) begin
+                        acc_cnt       <= acc_cnt + 1'b1;
+                    end else if (acc_cnt < ADDR_SETUP + ROM_WAIT - 1) begin
+                        rd_n <= 1'b0;
+                        acc_cnt <= acc_cnt + 1'b1;
+                    end else begin
+                        // Sample while ~RD is still low (data stable; the cart
+                        // drives AD during the RD# low phase).
                         words[word_idx] <= {cart_tran_bank2, cart_tran_bank3};
                         rd_n            <= 1'b1;
                         cs_n            <= 1'b1;  // end this word's transaction
@@ -350,8 +376,6 @@ module gba_cart_controller #(
                             word_idx <= word_idx + 1'b1;
                             state    <= S_ROM_CS;   // next word: re-drive address
                         end
-                    end else begin
-                        acc_cnt <= acc_cnt + 1'b1;
                     end
                 end
 
@@ -485,21 +509,19 @@ module gba_cart_controller #(
                         wr_n  <= 1'b1;
                         acc_cnt <= acc_cnt + 1'b1;
                     end else if (eeprom_rnw) begin
-                        // Read bit: RD# low pulse, then sample D0 AFTER the
-                        // RD# rising edge (insideGadgets measures the data
-                        // being read right after RD goes high).
-                        if (acc_cnt < EEPROM_ADDR_SETUP + EEPROM_HALF_CYCLE) begin
+                        // Read bit: RD# low pulse, then sample D0 immediately
+                        // after the RD# rising edge. insideGadgets' logic
+                        // analyser capture reads AD0 right after RD goes high
+                        // (the chip holds the bit briefly past the edge);
+                        // waiting hundreds of ns reads the tri-stated bus.
+                        if (acc_cnt < EEPROM_ADDR_SETUP + EEPROM_HALF_CYCLE - 1) begin
                             rd_n <= 1'b0;
                             acc_cnt <= acc_cnt + 1'b1;
-                        end else if (acc_cnt < EEPROM_ADDR_SETUP + EEPROM_HALF_CYCLE + 20) begin
-                            // RD# rising edge; hold high and give the EEPROM
-                            // chip a few cycles to drive D0 after the edge
-                            // (insideGadgets: data appears right after RD
-                            // goes high). 20 cycles @100MHz = 200ns, safe for
-                            // slow custom chips; bit period ~760ns.
-                            rd_n <= 1'b1;
+                        end else if (acc_cnt == EEPROM_ADDR_SETUP + EEPROM_HALF_CYCLE - 1) begin
+                            rd_n <= 1'b1;   // rising edge
                             acc_cnt <= acc_cnt + 1'b1;
                         end else begin
+                            // Sample one cycle after the edge.
                             eeprom_dout <= cart_tran_bank3[0];
                             acc_cnt <= 8'd0;
                             state   <= S_DONE;
@@ -605,15 +627,19 @@ module gba_cart_controller #(
 
                 S_DONE: begin
                     rd_n  <= 1'b1;
-                    cs_n  <= 1'b1;
                     wr_n  <= 1'b1;
                     out_bank2_dir <= 1'b0;
                     out_bank3_dir <= 1'b0;
                     if (acc_cnt < RELEASE_DELAY - 1) begin
-                        // Release RD#/WR# first while CS2# (SRAM/Flash select)
-                        // stays low: real SRAM samples data on the WR# rising
-                        // edge, and Flash needs write-recovery time (WE# high
-                        // while CE# is still low).
+                        // Release RD#/WR# first while the chip-selects stay
+                        // low: real SRAM samples data on the WR# rising edge,
+                        // Flash needs write-recovery time (WE# high while
+                        // CE# is still low), and the ROM-chip GPIO registers
+                        // latch on the CS# rising edge with data hold time.
+                        // CS1# keeps its previous value (low for GPIO/EEPROM
+                        // write recovery, high for SRAM/Flash so the ROM chip
+                        // is never selected); CS2# (pin30) likewise via the
+                        // pin30 mux below.
                         acc_cnt <= acc_cnt + 1'b1;
                     end else begin
                         if (eeprom_sess && eeprom_dma_r) begin
@@ -653,9 +679,15 @@ module gba_cart_controller #(
     assign cart_tran_bank3     = out_bank3_dir ? out_bank3 : 8'hzz;
     assign cart_tran_bank3_dir = out_bank3_dir;
 
-    // bank0 bit layout: [3]=PHI# [2]=WR# [1]=RD# [0]=CS1#
-    // GBATEK: default WAITCNT (4317h) disables the PHI terminal output.
-    assign cart_tran_bank0     = {PHI_ENABLE ? phi : 1'b1, wr_n, rd_n, cs_n};
+    // bank0 bit layout: [7]=PHI# [6]=WR# [5]=RD# [4]=CS1#
+    // PHI follows WAITCNT bit12..11 (disabled/idle-high at reset, GBA
+    // default). The 9853 GPIO/RTC chips require a running PHI.
+    // Explicit [7:4] mapping, matching core_top/apf_top - no implicit
+    // slicing/alignment involved.
+    assign cart_tran_bank0[7]  = phi_enable ? phi : 1'b1;
+    assign cart_tran_bank0[6]  = wr_n;
+    assign cart_tran_bank0[5]  = rd_n;
+    assign cart_tran_bank0[4]  = cs_n;
     assign cart_tran_bank0_dir = 1'b1;
 
     // pin30: CS2#/RES# — CS2# active during SRAM/Flash accesses and for one
