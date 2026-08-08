@@ -151,6 +151,8 @@ module gba_cart_controller #(
     localparam S_GPIO_R    = 4'd8;   // GPIO read data phase
     localparam S_GPIO_W    = 4'd9;   // GPIO write data phase
     localparam S_DONE      = 4'd10;
+    localparam S_EEPROM_RESET = 4'd11; // /CS high pulse between EEPROM
+                                       // command burst and data burst
 
     reg [3:0]  state;
     reg [1:0]  word_idx;
@@ -167,6 +169,12 @@ module gba_cart_controller #(
     // the open session, and the session closes once DMA pauses.
     reg        eeprom_sess;
     reg [9:0]  eeprom_sess_cnt;
+    // Direction of the last EEPROM bit of the current session. The game
+    // writes the read/write command as a burst of write bits (rnw=0) and then
+    // reads data as a burst of read bits (rnw=1). The rnw transition means
+    // the command burst is over: real carts latch the command when /CS rises,
+    // so we must pulse /CS high before starting the read burst.
+    reg        eeprom_rnw_prev;
 
     // Bus output registers
     reg [7:0]  out_bank1, out_bank2, out_bank3;
@@ -196,6 +204,7 @@ module gba_cart_controller #(
             gpio_done       <= 1'b0;
             eeprom_sess     <= 1'b0;
             eeprom_sess_cnt <= 10'd0;
+            eeprom_rnw_prev <= 1'b1;
             out_bank1       <= 8'h00;
             out_bank2       <= 8'h00;
             out_bank3       <= 8'h00;
@@ -262,8 +271,20 @@ module gba_cart_controller #(
                     end else if (eeprom_req) begin
                         eeprom_sess     <= 1'b1;   // (re)open EEPROM session
                         eeprom_sess_cnt <= 10'd0;
-                        acc_cnt         <= 8'd0;
-                        state           <= S_EEPROM;
+                        if (eeprom_sess && (eeprom_rnw != eeprom_rnw_prev)) begin
+                            // Session in progress and the bit direction
+                            // flipped (write burst -> read burst): the
+                            // command burst is complete. Pulse /CS high so the
+                            // cart chip latches the command (read) or starts
+                            // programming (write -> ready polling), then
+                            // start the read burst with /CS low again.
+                            acc_cnt <= 8'd0;
+                            state   <= S_EEPROM_RESET;
+                        end else begin
+                            acc_cnt <= 8'd0;
+                            state   <= S_EEPROM;
+                        end
+                        eeprom_rnw_prev <= eeprom_rnw;
                     end else if (gpio_req) begin
                         eeprom_sess     <= 1'b0;
                         // Halfword address: 0x080000C4..0x080000C8 (byte) >> 1
@@ -429,13 +450,22 @@ module gba_cart_controller #(
                     end
 
                     if (acc_cnt < EEPROM_ADDR_SETUP) begin
-                        // Address/data setup: A23 (+D0) stable, CS# still high
-                        cs_n  <= 1'b1;
+                        // Address/data setup: A23 (+D0) stable.
+                        // First bit of a new session: CS# starts high, then
+                        // falls. Subsequent bits of the same DMA transfer:
+                        // CS# MUST stay low - GBATEK requires /CS=LOW and
+                        // A23=HIGH throughout the whole transfer; raising CS#
+                        // between bits resets the serial EEPROM chip.
+                        // eeprom_sess here is the OLD value: 0 on the first
+                        // request, 1 on later requests of the same session.
+                        cs_n  <= ~eeprom_sess;
                         rd_n  <= 1'b1;
                         wr_n  <= 1'b1;
                         acc_cnt <= acc_cnt + 1'b1;
                     end else if (acc_cnt == EEPROM_ADDR_SETUP) begin
-                        cs_n  <= 1'b0;   // CS# falls with A23/D0 already stable
+                        // CS# falls with A23/D0 already stable (first bit),
+                        // or simply stays low (session in progress).
+                        cs_n  <= 1'b0;
                         rd_n  <= 1'b1;
                         wr_n  <= 1'b1;
                         acc_cnt <= acc_cnt + 1'b1;
@@ -451,8 +481,12 @@ module gba_cart_controller #(
                         if (acc_cnt < EEPROM_ADDR_SETUP + EEPROM_HALF_CYCLE) begin
                             rd_n <= 1'b0;
                             acc_cnt <= acc_cnt + 1'b1;
-                        end else if (acc_cnt == EEPROM_ADDR_SETUP + EEPROM_HALF_CYCLE) begin
-                            rd_n <= 1'b1;   // RD# rising edge
+                        end else if (acc_cnt < EEPROM_ADDR_SETUP + EEPROM_HALF_CYCLE + 4) begin
+                            // RD# rising edge; hold high and give the EEPROM
+                            // chip a few cycles to drive D0 after the edge
+                            // (insideGadgets: data appears right after RD
+                            // goes high). 4 cycles @100MHz = 40ns.
+                            rd_n <= 1'b1;
                             acc_cnt <= acc_cnt + 1'b1;
                         end else begin
                             eeprom_dout <= cart_tran_bank3[0];
@@ -469,6 +503,29 @@ module gba_cart_controller #(
                             acc_cnt <= 8'd0;
                             state   <= S_DONE;
                         end
+                    end
+                end
+
+                // ---- EEPROM command-latch pulse ----
+                // After the write (command) burst ends and the read burst
+                // begins, the real cart needs /CS to rise once so the chip
+                // latches the command. Keep A23 high, hold /CS high for a few
+                // cycles, then let S_EEPROM pull it low again for the read
+                // burst (S_EEPROM keeps /CS low when eeprom_sess is active).
+                S_EEPROM_RESET: begin
+                    out_bank1     <= 8'h80;      // A23 stays HIGH
+                    out_bank1_dir <= 1'b1;
+                    out_bank2_dir <= 1'b0;
+                    out_bank3_dir <= 1'b0;
+                    cs_n          <= 1'b1;       // /CS high pulse
+                    rd_n          <= 1'b1;
+                    wr_n          <= 1'b1;
+                    cs2_n         <= 1'b1;
+                    if (acc_cnt < 16) begin
+                        acc_cnt <= acc_cnt + 1'b1;
+                    end else begin
+                        acc_cnt <= 8'd0;
+                        state   <= S_EEPROM;     // begin the read burst
                     end
                 end
 
@@ -496,31 +553,42 @@ module gba_cart_controller #(
                 S_GPIO_R: begin
                     out_bank2_dir <= 1'b0;
                     out_bank3_dir <= 1'b0;
-                    if (acc_cnt < SAVE_WAIT) begin
+                    if (acc_cnt < SAVE_WAIT - 2) begin
                         rd_n <= 1'b0;
                         acc_cnt <= acc_cnt + 1'b1;
-                    end else if (acc_cnt == SAVE_WAIT) begin
-                        rd_n <= 1'b1;   // RD# rising edge
+                    end else if (acc_cnt == SAVE_WAIT - 2) begin
+                        // Sample while RD# is still LOW: the GPIO/ROM chip
+                        // drives data during the RD# low phase and the CPU
+                        // latches it on the RD# rising edge, so sampling must
+                        // happen before the edge (same as S_ROM_DATA).
+                        gpio_dout <= cart_tran_bank3[3:0];
                         acc_cnt <= acc_cnt + 1'b1;
                     end else begin
-                        // Sample AFTER RD# rose (cart GPIO data is stable
-                        // after the read strobe, same as EEPROM).
-                        gpio_dout <= cart_tran_bank3[3:0];
+                        rd_n    <= 1'b1;   // RD# rising edge
                         acc_cnt   <= 8'd0;
                         state     <= S_DONE;
                     end
                 end
 
                 S_GPIO_W: begin
+                    // Drive the write data first and hold WR# high during a
+                    // setup phase, so the ROM-chip GPIO registers sample
+                    // stable data when WR# falls (real GBA drives data before
+                    // asserting WR#; writing data and WR# on the same cycle
+                    // gives zero setup time and can store the old address
+                    // byte instead of the GPIO data).
                     out_bank3     <= {4'b0, gpio_din_r};
                     out_bank3_dir <= 1'b1;
-                    wr_n          <= 1'b0;
-                    if (acc_cnt == SAVE_WAIT - 1) begin
+                    if (acc_cnt < ADDR_SETUP) begin
+                        wr_n    <= 1'b1;   // data setup, WR# high
+                        acc_cnt <= acc_cnt + 1'b1;
+                    end else if (acc_cnt < ADDR_SETUP + SAVE_WAIT - 1) begin
+                        wr_n    <= 1'b0;   // WR# low pulse
+                        acc_cnt <= acc_cnt + 1'b1;
+                    end else begin
                         wr_n    <= 1'b1;
                         acc_cnt <= 8'd0;
                         state   <= S_DONE;
-                    end else begin
-                        acc_cnt <= acc_cnt + 1'b1;
                     end
                 end
 

@@ -301,24 +301,42 @@ module tb_gba_cart_controller;
                      cart_tran_bank0[0], cart_tran_bank1);
             errors = errors + 1;
         end
+
+        // ---- EEPROM write->read burst transition ----
+        // The read/write command is a burst of write bits (rnw=0); the data
+        // burst follows with rnw=1. The controller must pulse /CS high once
+        // on that transition so the cart chip latches the command, then pull
+        // it low again for the read burst. Verify a /CS high pulse happens
+        // before the read completes (no timeout between the bursts).
+        begin
+            reg saw_cs_high;
+            saw_cs_high = 0;
+            @(posedge clk);
+            eeprom_req <= 1; eeprom_rnw <= 1;
+            @(posedge clk);
+            eeprom_req <= 0;
+            while (!eeprom_done) begin
+                @(posedge clk);
+                if (cart_tran_bank0[0] === 1'b1) saw_cs_high = 1;
+            end
+            @(posedge clk);
+            if (!saw_cs_high) begin
+                $display("FAIL: EEPROM write->read transition did not pulse /CS high");
+                errors = errors + 1;
+            end
+            // model drives a real 0/1 on D0 (toggles per RD# pulse); just check
+            // the handshake returned valid data instead of high-Z.
+            if (eeprom_dout !== 1'b0 && eeprom_dout !== 1'b1) begin
+                $display("FAIL: EEPROM read bit got %b (not 0/1)", eeprom_dout);
+                errors = errors + 1;
+            end
+        end
+
         // Let the session timeout expire, then verify release.
         repeat (1100) @(posedge clk);
         if (cart_tran_bank0[0] !== 1'b1) begin
             $display("FAIL: EEPROM session not released after timeout (cs1=%b)",
                      cart_tran_bank0[0]);
-            errors = errors + 1;
-        end
-
-        @(posedge clk);
-        eeprom_req <= 1; eeprom_rnw <= 1;
-        @(posedge clk);
-        eeprom_req <= 0;
-        wait (eeprom_done);
-        @(posedge clk);
-        // model drives a real 0/1 on D0 (toggles per RD# pulse); just check
-        // the handshake returned valid data instead of high-Z.
-        if (eeprom_dout !== 1'b0 && eeprom_dout !== 1'b1) begin
-            $display("FAIL: EEPROM read bit got %b (not 0/1)", eeprom_dout);
             errors = errors + 1;
         end
 

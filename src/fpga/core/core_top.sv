@@ -239,7 +239,9 @@ wire        han_rom_cart_mode;
 wire        han_save_cart_mode;
 wire        han_gpio_cart_mode;
 wire        han_eeprom_cart_mode;
-assign han_rom_cart_mode  = 1'b0;   // TODO(CHIP32): switch from IO bridge
+// 迂回汉化：ROM 从 SD 卡运行；实体卡带只承担存档/EEPROM/GPIO。
+// （外挂汉化模式=1 时 ROM 走卡带，作为未来功能保留）
+assign han_rom_cart_mode  = 1'b0;
 assign han_save_cart_mode = 1'b1;   // 迂回汉化：存档读写走卡带槽实体卡带
 assign han_gpio_cart_mode = 1'b1;   // 迂回汉化：RTC/震动/太阳/陀螺走卡带硬件
 assign han_eeprom_cart_mode = 1'b1; // 迂回汉化：EEPROM 位流走卡带槽实体芯片
