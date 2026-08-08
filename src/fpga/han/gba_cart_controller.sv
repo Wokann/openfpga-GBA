@@ -40,6 +40,11 @@ module gba_cart_controller #(
     // clock at ~600 ns full period (~300 ns half). At 100 MHz that is
     // ~30 clk_sys per half pulse; keep a little margin.
     parameter integer EEPROM_HALF_CYCLE = 32, // clk_sys cycles per RD#/WR# half pulse
+    parameter integer EEPROM_ADDR_SETUP = 4, // clk_sys cycles A23/D0 stable
+                                             // before CS# falls (EEPROM)
+    parameter integer RELEASE_DELAY = 4,     // clk_sys cycles CS2# stays low
+                                             // after WR#/RD# rise (write
+                                             // recovery, real Flash needs it)
     parameter integer EEPROM_SESS_TIMEOUT = 1024, // clk_sys cycles without EEPROM
                                                   // access before releasing CS2#/A23
     parameter integer RESET_LEN  = 4096
@@ -335,8 +340,13 @@ module gba_cart_controller #(
                 // Real GBA SRAM protocol: 16-bit address on AD[15:0],
                 // 8-bit data on A[23:16] (bank1), selected by ~CS2.
                 S_SRAM: begin
-                    // Address phase: drive AD[15:0], keep A[23:16] tri-state
-                    // (real cart drives data onto A[23:16] only when ~RD low).
+                    // Address phase: drive AD[15:0]. CS2# falls only after the
+                    // address has been stable for >=2 cycles. For writes the
+                    // data on A[23:16] is pre-driven from the first cycle so
+                    // it is stable >=4 cycles before WR# falls. Real Flash
+                    // samples address+data on the WE# falling edge and needs
+                    // ~30-50ns data setup; SRAM samples on the WE# rising edge
+                    // so it tolerates the earlier data too.
                     out_bank2     <= save_addr_r[15:8];
                     out_bank3     <= save_addr_r[7:0];
                     out_bank2_dir <= 1'b1;
@@ -344,22 +354,32 @@ module gba_cart_controller #(
                     cs_n          <= 1'b1;
 
                     if (acc_cnt < ADDR_SETUP) begin
-                        out_bank1_dir <= 1'b0;    // data bus input for read
-                        rd_n          <= 1'b1;    // keep ~RD high during address setup
-                        wr_n          <= 1'b1;
-                        cs2_n <= 1'b0;            // ~CS2 low selects SRAM/Flash
-                        if (save_is_write && acc_cnt == ADDR_SETUP - 1) begin
-                            // Pre-drive write data on A[23:16] one cycle before
-                            // ~WR falls so the chip samples stable data.
+                        // CS2# falls only after the address has settled
+                        if (acc_cnt >= 2) cs2_n <= 1'b0;
+                        else              cs2_n <= 1'b1;
+                        if (save_is_write) begin
                             out_bank1     <= save_din;
                             out_bank1_dir <= 1'b1;
+                        end else begin
+                            out_bank1_dir <= 1'b0;   // data bus input for read
+                        end
+                        rd_n <= 1'b1;   // keep strobes high during address setup
+                        wr_n <= 1'b1;
+                        acc_cnt <= acc_cnt + 1'b1;
+                    end else if (acc_cnt == ADDR_SETUP) begin
+                        // One extra cycle so address+data are fully stable,
+                        // then start the strobe.
+                        if (save_is_write) begin
+                            wr_n <= 1'b0;
+                            rd_n <= 1'b1;
+                        end else begin
+                            rd_n <= 1'b0;
+                            wr_n <= 1'b1;
                         end
                         acc_cnt <= acc_cnt + 1'b1;
                     end else if (save_is_write) begin
-                        // Data phase: drive write data on A[23:16], strobe WR#
-                        rd_n          <= 1'b1;
-                        if (acc_cnt == ADDR_SETUP)
-                            wr_n <= 1'b0;
+                        // Write strobe phase
+                        rd_n <= 1'b1;
                         if (acc_cnt == ADDR_SETUP + SAVE_WAIT - 1) begin
                             wr_n  <= 1'b1;
                             acc_cnt <= 8'd0;
@@ -368,12 +388,9 @@ module gba_cart_controller #(
                             acc_cnt <= acc_cnt + 1'b1;
                         end
                     end else begin
-                        // Read phase: release A[23:16], sample data
+                        // Read strobe phase: sample data on A[23:16]
                         out_bank1_dir <= 1'b0;
                         wr_n          <= 1'b1;
-                        if (acc_cnt == ADDR_SETUP) begin
-                            rd_n <= 1'b0;
-                        end
                         if (acc_cnt == ADDR_SETUP + SAVE_WAIT - 1) begin
                             rd_n      <= 1'b1;
                             save_dout <= cart_tran_bank1;
@@ -398,40 +415,58 @@ module gba_cart_controller #(
                     out_bank1     <= 8'h80;
                     out_bank1_dir <= 1'b1;
                     out_bank2_dir <= 1'b0;
-                    cs_n          <= 1'b0;   // ROMCS low for whole transfer
                     cs2_n         <= 1'b1;   // pin30 stays RES# high
                     if (eeprom_rnw) begin
-                        // Read bit: RD# low pulse, sample D0 before release.
                         out_bank3_dir <= 1'b0;
                         wr_n          <= 1'b1;
-                        if (acc_cnt < EEPROM_HALF_CYCLE) begin
+                    end else begin
+                        // Write bit: D0 driven from the very first cycle so it
+                        // is stable long before WR# falls.
+                        out_bank3     <= {7'b0, eeprom_din};
+                        out_bank3_dir <= 1'b1;
+                        rd_n          <= 1'b1;
+                    end
+
+                    if (acc_cnt < EEPROM_ADDR_SETUP) begin
+                        // Address/data setup: A23 (+D0) stable, CS# still high
+                        cs_n  <= 1'b1;
+                        rd_n  <= 1'b1;
+                        wr_n  <= 1'b1;
+                        acc_cnt <= acc_cnt + 1'b1;
+                    end else if (acc_cnt == EEPROM_ADDR_SETUP) begin
+                        cs_n  <= 1'b0;   // CS# falls with A23/D0 already stable
+                        rd_n  <= 1'b1;
+                        wr_n  <= 1'b1;
+                        acc_cnt <= acc_cnt + 1'b1;
+                    end else if (acc_cnt < EEPROM_ADDR_SETUP + 2) begin
+                        // Hold CS# low one cycle before starting the bit pulse
+                        rd_n  <= 1'b1;
+                        wr_n  <= 1'b1;
+                        acc_cnt <= acc_cnt + 1'b1;
+                    end else if (eeprom_rnw) begin
+                        // Read bit: RD# low pulse, then sample D0 AFTER the
+                        // RD# rising edge (insideGadgets measures the data
+                        // being read right after RD goes high).
+                        if (acc_cnt < EEPROM_ADDR_SETUP + EEPROM_HALF_CYCLE) begin
                             rd_n <= 1'b0;
-                        end else if (acc_cnt == EEPROM_HALF_CYCLE) begin
+                            acc_cnt <= acc_cnt + 1'b1;
+                        end else if (acc_cnt == EEPROM_ADDR_SETUP + EEPROM_HALF_CYCLE) begin
+                            rd_n <= 1'b1;   // RD# rising edge
+                            acc_cnt <= acc_cnt + 1'b1;
+                        end else begin
                             eeprom_dout <= cart_tran_bank3[0];
-                            rd_n        <= 1'b1;
-                        end
-                        if (acc_cnt >= EEPROM_HALF_CYCLE) begin
                             acc_cnt <= 8'd0;
                             state   <= S_DONE;
-                        end else begin
-                            acc_cnt <= acc_cnt + 1'b1;
                         end
                     end else begin
-                        // Write bit: D0 driven with data, WR# low pulse.
-                        rd_n          <= 1'b1;
-                        if (acc_cnt == 0) begin
-                            // Drive D0 one cycle before WR# falls (setup).
-                            out_bank3     <= {7'b0, eeprom_din};
-                            out_bank3_dir <= 1'b1;
-                        end
-                        if ((acc_cnt >= 1) && (acc_cnt < EEPROM_HALF_CYCLE))
+                        // Write bit: WR# low pulse (D0 held through the edge)
+                        if (acc_cnt < EEPROM_ADDR_SETUP + EEPROM_HALF_CYCLE - 1) begin
                             wr_n <= 1'b0;
-                        if (acc_cnt >= EEPROM_HALF_CYCLE) begin
+                            acc_cnt <= acc_cnt + 1'b1;
+                        end else begin
                             wr_n    <= 1'b1;
                             acc_cnt <= 8'd0;
                             state   <= S_DONE;
-                        end else begin
-                            acc_cnt <= acc_cnt + 1'b1;
                         end
                     end
                 end
@@ -489,10 +524,11 @@ module gba_cart_controller #(
                     wr_n  <= 1'b1;
                     out_bank2_dir <= 1'b0;
                     out_bank3_dir <= 1'b0;
-                    if (acc_cnt == 0) begin
+                    if (acc_cnt < RELEASE_DELAY - 1) begin
                         // Release RD#/WR# first while CS2# (SRAM/Flash select)
-                        // stays low; real SRAM samples data on the WR# rising
-                        // edge and needs CS2# low at that moment.
+                        // stays low: real SRAM samples data on the WR# rising
+                        // edge, and Flash needs write-recovery time (WE# high
+                        // while CE# is still low).
                         acc_cnt <= acc_cnt + 1'b1;
                     end else begin
                         if (eeprom_sess) begin
@@ -538,7 +574,7 @@ module gba_cart_controller #(
     // SRAM chips require); during EEPROM transfers pin30 stays at RES#
     // (EEPROM /CS is ROMCS, Pin 5).
     assign cart_tran_pin30        = ((state == S_SRAM) ||
-                                     ((state == S_DONE) && (acc_cnt == 8'd0))) ? cs2_n : res_n;
+                                     ((state == S_DONE) && (acc_cnt < RELEASE_DELAY - 1))) ? cs2_n : res_n;
     assign cart_tran_pin30_dir    = 1'b1;
     assign cart_pin30_pwroff_reset = 1'b0;
 

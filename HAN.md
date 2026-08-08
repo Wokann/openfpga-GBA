@@ -94,10 +94,15 @@ CI（`.github/workflows/build-branch.yml`）在编译前自动运行。
     512B 用 9 个 DMA 半字（6bit 地址）、8KB 用 17 个（14bit）
   - GBATEK GPIO 章节：80000C4h=C4 数据/C6 方向/C8 控制（4bit），RTC 经
     GPIO 3 线串行访问（SCK/SIO/CS），与控制器 16 位 R/W 桥一致
-- **写时序（本次修正）**：SRAM/EEPROM 写数据均在 WR# 下降沿前至少 1 个
-  时钟建立；WR#/RD# 先释放、CS2# 延迟一拍再释放（真实 SRAM 在 WR# 上升沿
-  采样数据且要求 CS2# 保持低，控制器 S_DONE 增加一拍延迟；pin30 在 S_DONE
-  第一拍仍输出 CS2#）
+- **写时序（真机反馈修正）**：SRAM 成功、Flash512 读成功、但 Flash 写
+  "看似成功却未持久化"（= 命令未被芯片执行）→ 原因是 Flash 在 **WE# 下降沿**
+  采样地址+数据，而旧实现数据只提前 1 拍（10ns）建立。修正：地址先稳定
+  至少 2 拍再拉低 CS2#；写数据从访问第一拍就预驱动（WE# 下降沿前约
+  40-50ns）；WR#/RD# 先释放、CS2# 保持低 RELEASE_DELAY=4 拍再释放（写恢复）
+- **EEPROM 读采样时机（真机反馈修正）**：按 insideGadgets 实测，读位时
+  **RD# 上升沿之后**才采样 D0（旧实现采样于 RD# 低电平末，可能采到无效
+  值）；同时增加 EEPROM_ADDR_SETUP=4 拍地址建立（A23/D0 先稳定，CS# 后拉低）
+- **EEPROM 写位**：D0 从访问第一拍起驱动（WR# 下降沿前稳定数十 ns）
 - **时序参数**（ROM_WAIT/SAVE_WAIT/ADDR_SETUP/EEPROM_HALF_CYCLE）为保守
   占位值，需真机卡带校准
 - **EEPROM 位时钟极性**：GBATEK + insideGadgets 确认 A23 恒高、位由

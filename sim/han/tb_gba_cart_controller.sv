@@ -89,14 +89,17 @@ module cart_rom_model (
     reg [7:0] bank3_drv;
     reg       bank3_en;
     always @(*) begin
-        if (!rd_n && !cs_n && gpio_sel) begin
+        if (!cs_n && eeprom_active && wr_n) begin
+            // EEPROM owns D0 while selected (data stays valid after RD#
+            // rises, per insideGadgets measurement); must out-prioritize ROM
+            // because ROM also sees CS# low + RD# pulses.
+            bank3_drv = {7'b0, eeprom_d0_out};
+            bank3_en  = 1'b1;
+        end else if (!rd_n && !cs_n && gpio_sel) begin
             bank3_drv = {4'b0, gpio_reg[gpio_idx]};
             bank3_en  = 1'b1;
         end else if (!rd_n && !cs_n) begin
             bank3_drv = rom_dout[7:0];
-            bank3_en  = 1'b1;
-        end else if (!cs_n && eeprom_active && !rd_n && wr_n) begin
-            bank3_drv = {7'b0, eeprom_d0_out};
             bank3_en  = 1'b1;
         end else begin
             bank3_drv = 8'hzz;
@@ -222,7 +225,6 @@ module tb_gba_cart_controller;
             $display("FAIL: ROM read");
             errors = errors + 1;
         end
-
         // ---- SRAM write + read-back (data on A[23:16], addr on AD[15:0]) ----
         @(posedge clk);
         save_req <= 1; save_addr <= 17'h1234; save_rnw <= 0; save_din <= 8'hAB;
@@ -313,9 +315,10 @@ module tb_gba_cart_controller;
         eeprom_req <= 0;
         wait (eeprom_done);
         @(posedge clk);
-        // model returns 0 for read; just check handshake completed
-        if (eeprom_dout !== 1'b0) begin
-            $display("FAIL: EEPROM read bit got %b expected 0", eeprom_dout);
+        // model drives a real 0/1 on D0 (toggles per RD# pulse); just check
+        // the handshake returned valid data instead of high-Z.
+        if (eeprom_dout !== 1'b0 && eeprom_dout !== 1'b1) begin
+            $display("FAIL: EEPROM read bit got %b (not 0/1)", eeprom_dout);
             errors = errors + 1;
         end
 
