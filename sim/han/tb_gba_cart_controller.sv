@@ -142,6 +142,7 @@ module tb_gba_cart_controller;
     reg        eeprom_req = 0;
     reg        eeprom_rnw = 1;
     reg        eeprom_din = 0;
+    reg        eeprom_dma = 1;   // 1 = DMA3 burst, 0 = CPU poll
     wire       eeprom_dout;
     wire       eeprom_done;
 
@@ -185,6 +186,7 @@ module tb_gba_cart_controller;
         .eeprom_req             (eeprom_req),
         .eeprom_rnw             (eeprom_rnw),
         .eeprom_din             (eeprom_din),
+        .eeprom_dma             (eeprom_dma),
         .eeprom_dout            (eeprom_dout),
         .eeprom_done            (eeprom_done),
         .gpio_req               (gpio_req),
@@ -337,6 +339,22 @@ module tb_gba_cart_controller;
         if (cart_tran_bank0[0] !== 1'b1) begin
             $display("FAIL: EEPROM session not released after timeout (cs1=%b)",
                      cart_tran_bank0[0]);
+            errors = errors + 1;
+        end
+
+        // ---- EEPROM CPU poll (write-complete ready polling) ----
+        // A standalone CPU LDRH/STRH access (eeprom_dma=0) must be its own
+        // /CS low-high cycle: after the bit completes, /CS returns high so the
+        // cart chip can update its busy/ready status.
+        @(posedge clk);
+        eeprom_req <= 1; eeprom_rnw <= 1; eeprom_dma <= 0;
+        @(posedge clk);
+        eeprom_req <= 0;
+        wait (eeprom_done);
+        @(posedge clk);
+        repeat (8) @(posedge clk);
+        if (cart_tran_bank0[0] !== 1'b1) begin
+            $display("FAIL: EEPROM CPU poll left /CS low (cs1=%b)", cart_tran_bank0[0]);
             errors = errors + 1;
         end
 

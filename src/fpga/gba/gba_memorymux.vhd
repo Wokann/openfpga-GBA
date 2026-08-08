@@ -121,6 +121,8 @@ entity gba_memorymux is
       EEPROM_ext_req        : out    std_logic := '0';   -- bit access request pulse
       EEPROM_ext_rnw        : out    std_logic := '0';   -- 1 = read bit, 0 = write bit
       EEPROM_ext_din        : out    std_logic := '0';   -- write data bit (D0)
+      EEPROM_ext_dma        : out    std_logic := '0';   -- 1 = bit access from DMA3 burst,
+                                                          -- 0 = standalone CPU access (polling)
       EEPROM_ext_dout       : in     std_logic := '0';   -- read data bit (D0)
       EEPROM_ext_done       : in     std_logic := '0';   -- bit access complete
       -- HAN: 迂回汉化 - save (SRAM/Flash) 写访问透传给实体卡带，
@@ -1146,6 +1148,7 @@ begin
                   -- 直接转发为位级读请求，物理芯片自行解析命令流。
                   EEPROM_ext_req <= '1';
                   EEPROM_ext_rnw <= '1';
+                  EEPROM_ext_dma <= last_access_dma;
                   state          <= EEPROM_WAITREAD;
                else
                   case (eepromMode) is
@@ -1226,6 +1229,7 @@ begin
                   EEPROM_ext_req <= '1';
                   EEPROM_ext_rnw <= '0';
                   EEPROM_ext_din <= rotate_writedata(0);
+                  EEPROM_ext_dma <= last_access_dma;
                   state          <= EEPROM_WAITREAD;
                else
                   case (eepromMode) is

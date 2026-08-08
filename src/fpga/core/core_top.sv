@@ -269,6 +269,7 @@ wire        han_cart_gpio_done;
 wire        han_cart_eeprom_req;
 wire        han_cart_eeprom_rnw;
 wire        han_cart_eeprom_din;
+wire        han_cart_eeprom_dma;
 wire        han_cart_eeprom_dout;
 wire        han_cart_eeprom_done;
 
@@ -314,6 +315,7 @@ gba_cart_controller #(
     .eeprom_req             ( han_cart_eeprom_req ),
     .eeprom_rnw             ( han_cart_eeprom_rnw ),
     .eeprom_din             ( han_cart_eeprom_din ),
+    .eeprom_dma             ( han_cart_eeprom_dma ),
     .eeprom_dout            ( han_cart_eeprom_dout ),
     .eeprom_done            ( han_cart_eeprom_done ),
     .cart_present           ( han_cart_present ),
@@ -327,6 +329,7 @@ wire [3:0]  gba_gpio_dout_w, gba_gpio_din_w;
 wire        gba_save_sram, gba_save_flash, gba_save_eeprom;
 // HAN EEPROM bridge signals (gba_top <-> core_top)
 wire        gba_eeprom_req_w, gba_eeprom_rnw_w, gba_eeprom_din_w;
+wire        gba_eeprom_dma_w;
 wire        gba_eeprom_dout_w, gba_eeprom_done_w;
 
 // GPIO requests from gba_top -> cartridge controller
@@ -343,6 +346,7 @@ assign gba_gpio_done_in_w = han_gpio_cart_mode ? han_cart_gpio_done : 1'b0;
 assign han_cart_eeprom_req = gba_eeprom_req_w;
 assign han_cart_eeprom_rnw = gba_eeprom_rnw_w;
 assign han_cart_eeprom_din = gba_eeprom_din_w;
+assign han_cart_eeprom_dma = gba_eeprom_dma_w;
 // Responses back to gba_top (meaningful only in cart mode)
 assign gba_eeprom_dout_w   = han_eeprom_cart_mode ? han_cart_eeprom_dout : 1'b0;
 assign gba_eeprom_done_w   = han_eeprom_cart_mode ? han_cart_eeprom_done : 1'b0;
@@ -1770,6 +1774,7 @@ gba_top #(
     .EEPROM_ext_req_out  ( gba_eeprom_req_w ),
     .EEPROM_ext_rnw_out  ( gba_eeprom_rnw_w ),
     .EEPROM_ext_din_out  ( gba_eeprom_din_w ),
+    .EEPROM_ext_dma_out  ( gba_eeprom_dma_w ),
     .EEPROM_ext_dout_in  ( gba_eeprom_dout_w ),
     .EEPROM_ext_done_in  ( gba_eeprom_done_w ),
     .save_cart_mode      ( han_save_cart_mode ),

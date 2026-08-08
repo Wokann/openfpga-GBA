@@ -87,6 +87,9 @@ module gba_cart_controller #(
     input  wire        eeprom_req,
     input  wire        eeprom_rnw,         // 1 = read, 0 = write
     input  wire        eeprom_din,         // write data bit (D0)
+    input  wire        eeprom_dma,         // 1 = bit access via DMA3 burst,
+                                           // 0 = standalone CPU LDRH/STRH
+                                           // (write-complete ready polling)
     output reg         eeprom_dout,        // read data bit (D0)
     output reg         eeprom_done,
 
@@ -169,6 +172,11 @@ module gba_cart_controller #(
     // the open session, and the session closes once DMA pauses.
     reg        eeprom_sess;
     reg [9:0]  eeprom_sess_cnt;
+    // Latched per-access flag: 1 = this bit was requested by a DMA3 burst
+    // (keep /CS low across the burst), 0 = standalone CPU access (polling,
+    // each access is its own /CS low-high cycle so the cart chip updates its
+    // busy/ready status on the /CS rising edge).
+    reg        eeprom_dma_r;
     // Direction of the last EEPROM bit of the current session. The game
     // writes the read/write command as a burst of write bits (rnw=0) and then
     // reads data as a burst of read bits (rnw=1). The rnw transition means
@@ -205,6 +213,7 @@ module gba_cart_controller #(
             eeprom_sess     <= 1'b0;
             eeprom_sess_cnt <= 10'd0;
             eeprom_rnw_prev <= 1'b1;
+            eeprom_dma_r    <= 1'b1;
             out_bank1       <= 8'h00;
             out_bank2       <= 8'h00;
             out_bank3       <= 8'h00;
@@ -271,6 +280,7 @@ module gba_cart_controller #(
                     end else if (eeprom_req) begin
                         eeprom_sess     <= 1'b1;   // (re)open EEPROM session
                         eeprom_sess_cnt <= 10'd0;
+                        eeprom_dma_r    <= eeprom_dma;
                         if (eeprom_sess && (eeprom_rnw != eeprom_rnw_prev)) begin
                             // Session in progress and the bit direction
                             // flipped (write burst -> read burst): the
@@ -481,11 +491,12 @@ module gba_cart_controller #(
                         if (acc_cnt < EEPROM_ADDR_SETUP + EEPROM_HALF_CYCLE) begin
                             rd_n <= 1'b0;
                             acc_cnt <= acc_cnt + 1'b1;
-                        end else if (acc_cnt < EEPROM_ADDR_SETUP + EEPROM_HALF_CYCLE + 4) begin
+                        end else if (acc_cnt < EEPROM_ADDR_SETUP + EEPROM_HALF_CYCLE + 20) begin
                             // RD# rising edge; hold high and give the EEPROM
                             // chip a few cycles to drive D0 after the edge
                             // (insideGadgets: data appears right after RD
-                            // goes high). 4 cycles @100MHz = 40ns.
+                            // goes high). 20 cycles @100MHz = 200ns, safe for
+                            // slow custom chips; bit period ~760ns.
                             rd_n <= 1'b1;
                             acc_cnt <= acc_cnt + 1'b1;
                         end else begin
@@ -605,15 +616,19 @@ module gba_cart_controller #(
                         // while CE# is still low).
                         acc_cnt <= acc_cnt + 1'b1;
                     end else begin
-                        if (eeprom_sess) begin
+                        if (eeprom_sess && eeprom_dma_r) begin
                             // Keep /CS LOW and A23 HIGH across consecutive
                             // EEPROM bit accesses (GBATEK requirement for DMA3).
                             cs_n          <= 1'b0;
                             out_bank1     <= 8'h80;
                             out_bank1_dir <= 1'b1;
                         end else begin
+                            // Standalone access (or DMA burst finished):
+                            // release /CS. For write-complete polling this is
+                            // what lets the cart chip update its ready bit.
                             cs_n          <= 1'b1;
                             out_bank1_dir <= 1'b0;
+                            eeprom_sess   <= 1'b0;
                         end
                         cs2_n         <= 1'b1;   // release CS2# one cycle later
                         save_done     <= 1'b1;

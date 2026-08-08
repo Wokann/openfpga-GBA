@@ -53,6 +53,7 @@ entity gba_top is
       EEPROM_ext_req_out    : out    std_logic := '0';             -- bit access request pulse
       EEPROM_ext_rnw_out    : out    std_logic := '0';             -- 1 = read bit, 0 = write bit
       EEPROM_ext_din_out    : out    std_logic := '0';             -- write data bit
+      EEPROM_ext_dma_out    : out    std_logic := '0';             -- 1 = DMA3 burst, 0 = CPU poll
       EEPROM_ext_dout_in    : in     std_logic := '0';             -- read data bit
       EEPROM_ext_done_in    : in     std_logic := '0';             -- bit access done
       -- HAN: 迂回汉化 - save 写访问透传实体卡带（SRAM/Flash 命令不过内部模拟）
@@ -258,6 +259,7 @@ architecture arch of gba_top is
    signal EEPROM_ext_req_int   : std_logic := '0';
    signal EEPROM_ext_rnw_int   : std_logic := '0';
    signal EEPROM_ext_din_int   : std_logic := '0';
+   signal EEPROM_ext_dma_int   : std_logic := '0';
    
    signal gbaon                : std_logic := '0';
    signal gpu_out_active       : std_logic;
@@ -521,6 +523,7 @@ begin
       EEPROM_ext_req_out <= EEPROM_ext_req_int;
       EEPROM_ext_rnw_out <= EEPROM_ext_rnw_int;
       EEPROM_ext_din_out <= EEPROM_ext_din_int;
+      EEPROM_ext_dma_out <= EEPROM_ext_dma_int;
    
    igba_gpioRTCSolarGyro : entity work.gba_gpioRTCSolarGyro
    port map
@@ -673,6 +676,7 @@ begin
       EEPROM_ext_req       => EEPROM_ext_req_int,
       EEPROM_ext_rnw       => EEPROM_ext_rnw_int,
       EEPROM_ext_din       => EEPROM_ext_din_int,
+      EEPROM_ext_dma       => EEPROM_ext_dma_int,
       EEPROM_ext_dout      => EEPROM_ext_dout_in,
       EEPROM_ext_done      => EEPROM_ext_done_in,
       save_cart_mode       => save_cart_mode,
