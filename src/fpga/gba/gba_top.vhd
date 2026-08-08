@@ -48,6 +48,13 @@ entity gba_top is
       GPIO_Dout_out         : out    std_logic_vector(3 downto 0); -- write data D3..D0
       GPIO_Din_in           : in     std_logic_vector(3 downto 0) := (others => '0'); -- read data
       GPIO_done_in          : in     std_logic := '0';             -- read/write done pulse
+      -- HAN: EEPROM bit-serial forwarding to physical cartridge
+      EEPROM_cart_mode      : in     std_logic := '0';             -- 1 = EEPROM handled by cart
+      EEPROM_ext_req_out    : out    std_logic := '0';             -- bit access request pulse
+      EEPROM_ext_rnw_out    : out    std_logic := '0';             -- 1 = read bit, 0 = write bit
+      EEPROM_ext_din_out    : out    std_logic := '0';             -- write data bit
+      EEPROM_ext_dout_in    : in     std_logic := '0';             -- read data bit
+      EEPROM_ext_done_in    : in     std_logic := '0';             -- bit access done
       savestate_number      : in     integer;
       -- RTC
       RTC_timestampNew      : in     std_logic;                     -- new current timestamp from system
@@ -245,6 +252,10 @@ architecture arch of gba_top is
    signal GPIO_done_sim        : std_logic;
    signal GPIO_Din_muxed       : std_logic_vector(3 downto 0);
    signal GPIO_done_muxed      : std_logic;
+   -- HAN: EEPROM bit-serial forwarding
+   signal EEPROM_ext_req_int   : std_logic := '0';
+   signal EEPROM_ext_rnw_int   : std_logic := '0';
+   signal EEPROM_ext_din_int   : std_logic := '0';
    
    signal gbaon                : std_logic := '0';
    signal gpu_out_active       : std_logic;
@@ -500,8 +511,14 @@ begin
    GPIO_writeEna_out <= GPIO_writeEna;
    GPIO_addr_out     <= GPIO_addr;
    GPIO_Dout_out     <= GPIO_Dout;
-   GPIO_Din_muxed    <= GPIO_Din_in  when GPIO_cart_mode = '1' else GPIO_Din_sim;
-   GPIO_done_muxed   <= GPIO_done_in when GPIO_cart_mode = '1' else GPIO_done_sim;
+      GPIO_Din_muxed    <= GPIO_Din_in  when GPIO_cart_mode = '1' else GPIO_Din_sim;
+      GPIO_done_muxed   <= GPIO_done_in when GPIO_cart_mode = '1' else GPIO_done_sim;
+      -- HAN: EEPROM external mode is a straight passthrough (no internal mux
+      -- needed: in cart mode the internal EEPROM state machine is bypassed
+      -- inside gba_memorymux via EEPROM_cart_mode).
+      EEPROM_ext_req_out <= EEPROM_ext_req_int;
+      EEPROM_ext_rnw_out <= EEPROM_ext_rnw_int;
+      EEPROM_ext_din_out <= EEPROM_ext_din_int;
    
    igba_gpioRTCSolarGyro : entity work.gba_gpioRTCSolarGyro
    port map
@@ -648,7 +665,14 @@ begin
       GPIO_Din             => GPIO_Din_muxed,
       GPIO_Dout            => GPIO_Dout,    
       GPIO_writeEna        => GPIO_writeEna,
-      GPIO_addr            => GPIO_addr,    
+      GPIO_addr            => GPIO_addr,
+
+      EEPROM_cart_mode     => EEPROM_cart_mode,
+      EEPROM_ext_req       => EEPROM_ext_req_int,
+      EEPROM_ext_rnw       => EEPROM_ext_rnw_int,
+      EEPROM_ext_din       => EEPROM_ext_din_int,
+      EEPROM_ext_dout      => EEPROM_ext_dout_in,
+      EEPROM_ext_done      => EEPROM_ext_done_in,
       
       tilt                 => '0',
       AnalogTiltX          => (others => '0'),

@@ -12,20 +12,25 @@ module cart_rom_model (
     inout  wire [3:0] bank0,
     inout  wire       pin30
 );
-    wire rd_n = bank0[1];
-    wire cs_n = bank0[0];
-    wire wr_n = bank0[2];
+    wire rd_n  = bank0[1];
+    wire cs_n  = bank0[0];
+    wire wr_n  = bank0[2];
+    // pin30 is CS2#/RES#. During cart accesses CS2# is actively driven low;
+    // only treat it as a save/EEPROM select when the controller is not in
+    // its power-on reset phase (detect via wr/rd activity instead of the
+    // absolute pin level).
     wire cs2_n = pin30;
 
-    // Address latch while host drives AD (CS1# low, RD#/WR# high)
+    // Address latch on CS1# falling edge (real cart latches A0-A23 there).
+    // Use a small delay so the RTL's registered bank outputs (also clocked
+    // at this edge) have settled on the bus.
     reg [23:0] addr_latch;
-    always @(*) begin
-        if (rd_n && wr_n && !cs_n)
-            addr_latch = {bank1, bank2, bank3};
+    always @(negedge cs_n) begin
+        addr_latch <= #2 {bank1, bank2, bank3};
     end
     wire [15:0] rom_dout = addr_latch[15:0] ^ 16'hA55A;
 
-    // SRAM (save region via CS2#): latch address on CS2# falling edge
+    // SRAM (save region via CS2#): 16-bit address on AD, 8-bit data on A[23:16]
     reg [7:0] sram_mem [0:65535];
     reg [15:0] sram_addr_latch;
     always @(negedge cs2_n) begin
@@ -38,7 +43,7 @@ module cart_rom_model (
     end
     always @(posedge wr_n) begin
         if (!cs2_n)
-            sram_mem[sram_addr_latch] <= bank3;
+            sram_mem[sram_addr_latch] <= bank1;
     end
     wire [7:0] sram_dout = sram_mem[sram_addr_latch];
 
@@ -56,6 +61,18 @@ module cart_rom_model (
             gpio_reg[gpio_idx] <= bank3[3:0];
     end
 
+    // EEPROM: tiny model. On A23 falling edge while CS2# is low, the chip
+    // presents the next bit on D0. We return 0 for the first bit and then
+    // toggle a known pattern so the handshake is observable.
+    // EEPROM read-back bit: driven by the model only during an EEPROM
+    // bit-clock (A23 falling edge while CS2# is low and RD#/WR# idle).
+    reg eeprom_d0_out;
+    initial eeprom_d0_out = 1'b0;
+    always @(negedge bank1[7]) begin
+        if (!cs2_n && rd_n && wr_n)
+            eeprom_d0_out <= ~eeprom_d0_out;
+    end
+
     // Bus drive priority: GPIO / SRAM / ROM depending on active select
     reg [7:0] bank3_drv;
     reg       bank3_en;
@@ -63,11 +80,11 @@ module cart_rom_model (
         if (!rd_n && !cs_n && gpio_addr_latch[23:16] == 8'h08) begin
             bank3_drv = {4'b0, gpio_reg[gpio_idx]};
             bank3_en  = 1'b1;
-        end else if (!rd_n && !cs2_n && cs_n) begin
-            bank3_drv = sram_dout;
-            bank3_en  = 1'b1;
         end else if (!rd_n && !cs_n) begin
             bank3_drv = rom_dout[7:0];
+            bank3_en  = 1'b1;
+        end else if (!cs2_n && cs_n && rd_n && wr_n) begin
+            bank3_drv = {7'b0, eeprom_d0_out};
             bank3_en  = 1'b1;
         end else begin
             bank3_drv = 8'hzz;
@@ -75,7 +92,7 @@ module cart_rom_model (
         end
     end
     assign bank3 = bank3_en ? bank3_drv : 8'hzz;
-    assign bank1 = 8'hzz;
+    assign bank1 = (!rd_n && !cs2_n && cs_n) ? sram_dout : 8'hzz;
     assign bank2 = (!rd_n && !cs_n) ? rom_dout[15:8] : 8'hzz;
 endmodule
 
@@ -106,7 +123,12 @@ module tb_gba_cart_controller;
     reg  [7:0]  save_din = 0;
     wire [7:0]  save_dout;
     wire        save_done;
-    reg  [1:0]  save_type = 0;
+
+    reg        eeprom_req = 0;
+    reg        eeprom_rnw = 1;
+    reg        eeprom_din = 0;
+    wire       eeprom_dout;
+    wire       eeprom_done;
 
     reg        gpio_req = 0;
     reg        gpio_rnw = 1;
@@ -145,7 +167,11 @@ module tb_gba_cart_controller;
         .save_din               (save_din),
         .save_dout              (save_dout),
         .save_done              (save_done),
-        .save_type              (save_type),
+        .eeprom_req             (eeprom_req),
+        .eeprom_rnw             (eeprom_rnw),
+        .eeprom_din             (eeprom_din),
+        .eeprom_dout            (eeprom_dout),
+        .eeprom_done            (eeprom_done),
         .gpio_req               (gpio_req),
         .gpio_rnw               (gpio_rnw),
         .gpio_addr              (gpio_addr),
@@ -168,16 +194,6 @@ module tb_gba_cart_controller;
 
     integer errors = 0;
 
-    task pulse_req;
-        input req_bit;
-        begin
-            @(posedge clk);
-            if (req_bit) rd_req <= 1; else save_req <= 1;
-            @(posedge clk);
-            rd_req <= 0; save_req <= 0;
-        end
-    endtask
-
     initial begin
         repeat (10) @(posedge clk);
         reset_n <= 1;
@@ -195,8 +211,7 @@ module tb_gba_cart_controller;
             errors = errors + 1;
         end
 
-        // ---- SRAM write + read-back ----
-        save_type = 0;
+        // ---- SRAM write + read-back (data on A[23:16], addr on AD[15:0]) ----
         @(posedge clk);
         save_req <= 1; save_addr <= 17'h1234; save_rnw <= 0; save_din <= 8'hAB;
         @(posedge clk);
@@ -245,14 +260,25 @@ module tb_gba_cart_controller;
             errors = errors + 1;
         end
 
-        // ---- EEPROM write bit forward (must complete without hang) ----
-        save_type = 2;
+        // ---- EEPROM bit forward (write then read; must complete without hang) ----
         @(posedge clk);
-        save_req <= 1; save_addr <= 17'h0; save_rnw <= 0; save_din <= 8'h01;
+        eeprom_req <= 1; eeprom_rnw <= 0; eeprom_din <= 1'b1;
         @(posedge clk);
-        save_req <= 0;
-        wait (save_done);
+        eeprom_req <= 0;
+        wait (eeprom_done);
         @(posedge clk);
+
+        @(posedge clk);
+        eeprom_req <= 1; eeprom_rnw <= 1;
+        @(posedge clk);
+        eeprom_req <= 0;
+        wait (eeprom_done);
+        @(posedge clk);
+        // model returns 0 for read; just check handshake completed
+        if (eeprom_dout !== 1'b0) begin
+            $display("FAIL: EEPROM read bit got %b expected 0", eeprom_dout);
+            errors = errors + 1;
+        end
 
         if (errors == 0)
             $display("PASS: all checks passed");

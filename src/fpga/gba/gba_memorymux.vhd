@@ -111,6 +111,18 @@ entity gba_memorymux is
       GPIO_Dout            : out    std_logic_vector(3 downto 0);
       GPIO_writeEna        : out    std_logic := '0';
       GPIO_addr            : out    std_logic_vector(1 downto 0);
+
+      -- HAN: external (cartridge) EEPROM bit-serial forwarding
+      -- When EEPROM_cart_mode = 1, EEPROM accesses are forwarded one bit at
+      -- a time to the physical cartridge (A23=clk, D0=data, RAMCS=cs). The
+      -- real EEPROM chip parses the command stream itself, so this entity
+      -- does NOT run its internal EEPROM protocol simulation in that mode.
+      EEPROM_cart_mode      : in     std_logic := '0';
+      EEPROM_ext_req        : out    std_logic := '0';   -- bit access request pulse
+      EEPROM_ext_rnw        : out    std_logic := '0';   -- 1 = read bit, 0 = write bit
+      EEPROM_ext_din        : out    std_logic := '0';   -- write data bit (D0)
+      EEPROM_ext_dout       : in     std_logic := '0';   -- read data bit (D0)
+      EEPROM_ext_done       : in     std_logic := '0';   -- bit access complete
       
       tilt                 : in     std_logic;
       AnalogTiltX          : in     signed(7 downto 0);
@@ -1107,12 +1119,19 @@ begin
                end if;
                
             when EEPROMREAD =>
-               case (eepromMode) is
-                  when EEPROM_IDLE | EEPROM_READADDRESS | EEPROM_WRITEDATA =>
-                     rotate_data <= x"00000001";
-                     state       <= rotate;
-                     
-                  when EEPROM_READDATA =>
+               if (EEPROM_cart_mode = '1') then
+                  -- HAN 迂回：CPU 每次访问 EEPROM 区 = 物理芯片一个位时钟。
+                  -- 直接转发为位级读请求，物理芯片自行解析命令流。
+                  EEPROM_ext_req <= '1';
+                  EEPROM_ext_rnw <= '1';
+                  state          <= EEPROM_WAITREAD;
+               else
+                  case (eepromMode) is
+                     when EEPROM_IDLE | EEPROM_READADDRESS | EEPROM_WRITEDATA =>
+                        rotate_data <= x"00000001";
+                        state       <= rotate;
+                        
+                     when EEPROM_READDATA =>
                         if (eepromBits < 3) then
                            eepromBits <= eepromBits + 1;
                         else
@@ -1123,27 +1142,47 @@ begin
                         rotate_data <= (others => '0');
                         state       <= rotate;
                         
-                  when EEPROM_READDATA2 =>
-                     state <= EEPROM_WAITREAD;
-                     bus_out_Adr  <= std_logic_vector(to_unsigned(Softmap_GBA_EEPROM_ADDR, busadr_bits) + eepromAddress * 8 + eepromByte);
-                     bus_out_rnw  <= '1';
-                     bus_out_ena  <= '1';  
-                     eeprombitpos <= 7 - to_integer((eepromBits(2 downto 0)));
-                     eepromBits <= eepromBits + 1;
-                     if (eepromBits(2 downto 0) = "111") then
-                        eepromByte <= eepromByte + 1;
-                     end if;
-                     if (eepromBits = x"3F") then
-                        eepromMode <= EEPROM_IDLE;
-                     end if;
+                     when EEPROM_READDATA2 =>
+                        state <= EEPROM_WAITREAD;
+                        bus_out_Adr  <= std_logic_vector(to_unsigned(Softmap_GBA_EEPROM_ADDR, busadr_bits) + eepromAddress * 8 + eepromByte);
+                        bus_out_rnw  <= '1';
+                        bus_out_ena  <= '1';  
+                        eeprombitpos <= 7 - to_integer((eepromBits(2 downto 0)));
+                        eepromBits <= eepromBits + 1;
+                        if (eepromBits(2 downto 0) = "111") then
+                           eepromByte <= eepromByte + 1;
+                        end if;
+                        if (eepromBits = x"3F") then
+                           eepromMode <= EEPROM_IDLE;
+                        end if;
 
-                  when others => 
-                     rotate_data <= (others => '0');
-                     state       <= rotate;
-                end case;
+                     when others => 
+                        rotate_data <= (others => '0');
+                        state       <= rotate;
+                  end case;
+               end if;
                 
             when EEPROM_WAITREAD =>
-               if (bus_out_done = '1') then
+               -- HAN: EEPROM_ext_req is a single-cycle pulse. The cartridge
+               -- controller latches it once and executes one bit access; we
+               -- clear it here so a later access starts a fresh request.
+               EEPROM_ext_req <= '0';
+               if (EEPROM_cart_mode = '1' and EEPROM_ext_done = '1') then
+                  if (read_operation = '1') then
+                     rotate_data    <= (others => '0');
+                     state          <= rotate;
+                     if (EEPROM_ext_dout = '1') then
+                        if (adr_save(1) = '1') then
+                           rotate_data(16) <= '1';
+                        else
+                           rotate_data(0) <= '1'; 
+                        end if;
+                     end if;
+                  else
+                     mem_bus_done <= '1';
+                     state        <= IDLE;
+                  end if;
+               elsif (EEPROM_cart_mode = '0' and bus_out_done = '1') then
                   rotate_data    <= (others => '0');
                   state          <= rotate;
                   if (bus_out_Dout(eeprombitpos) = '1') then 
@@ -1159,6 +1198,12 @@ begin
                if (dma_eepromcount = 0) then
                   state        <= IDLE;
                   mem_bus_done <= '1';
+               elsif (EEPROM_cart_mode = '1') then
+                  -- HAN 迂回：转发位写请求，物理芯片自行解析命令流。
+                  EEPROM_ext_req <= '1';
+                  EEPROM_ext_rnw <= '0';
+                  EEPROM_ext_din <= rotate_writedata(0);
+                  state          <= EEPROM_WAITREAD;
                else
                   case (eepromMode) is
                      when EEPROM_IDLE =>

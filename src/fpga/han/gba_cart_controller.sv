@@ -6,12 +6,16 @@
 // cartridge in the Pocket slot:
 //   - ROM reads  : 16-bit, CS1#, read-only   (used by rom_source_mux)
 //   - Save access: 8-bit SRAM/Flash via CS2# (Flash commands are forwarded
-//                  to the cart chip, which executes them itself), or
-//                  EEPROM bit-serial via A23/RAMCS/D0
+//                  to the cart chip, which executes them itself)
+//   - EEPROM     : bit-serial via A23/RAMCS/D0 (per-bit forward, the real
+//                  EEPROM chip executes the command itself)
 //   - GPIO access: 16-bit R/W at 0x080000C4..0x080000C8 (RTC, solar, gyro,
 //                  rumble cart hardware)
 //
-// All timing constants are conservative placeholders; tune on real carts.
+// Timing is modeled on the measured cartridge protocol from
+//   https://github.com/jojolebarjos/gba-cartridge
+// and on GBATEK (WAITCNT defaults). All wait-state constants remain
+// conservative placeholders and MUST be tuned on real carts.
 //
 // PHI generation: clk_sys ~100.66 MHz / PHI_DIV = 16.78 MHz.
 
@@ -22,6 +26,7 @@ module gba_cart_controller #(
     parameter integer ROM_WAIT   = 24,  // clk_sys cycles per 16-bit ROM read
     parameter integer SAVE_WAIT  = 8,   // clk_sys cycles per 8-bit save access
     parameter integer ADDR_SETUP = 4,   // clk_sys cycles driving address
+    parameter integer EEPROM_HALF_CYCLE = 4, // clk_sys cycles per A23 half period
     parameter integer RESET_LEN  = 4096
 ) (
     input  wire        clk,
@@ -49,14 +54,20 @@ module gba_cart_controller #(
     output reg  [31:0] rd_data_second,
     output reg         rd_ready,
 
-    // ---- Save access (from core_top save_router) ----
+    // ---- Save access (SRAM/Flash, from core_top save_router) ----
     input  wire        save_req,
     input  wire [16:0] save_addr,          // byte offset within save region
     input  wire        save_rnw,           // 1 = read, 0 = write
     input  wire [7:0]  save_din,
     output reg  [7:0]  save_dout,
     output reg         save_done,
-    input  wire [1:0]  save_type,          // 0=SRAM 1=FLASH 2=EEPROM
+
+    // ---- EEPROM bit access (from gba_top, cart mode) ----
+    input  wire        eeprom_req,
+    input  wire        eeprom_rnw,         // 1 = read, 0 = write
+    input  wire        eeprom_din,         // write data bit (D0)
+    output reg         eeprom_dout,        // read data bit (D0)
+    output reg         eeprom_done,
 
     // ---- GPIO access (from gba_top, cart mode) ----
     input  wire        gpio_req,
@@ -96,11 +107,12 @@ module gba_cart_controller #(
         if (!reset_n) begin
             reset_cnt <= 12'd0;
             res_n     <= 1'b0;
-        end else if (reset_cnt < RESET_LEN) begin
+        end else if (reset_cnt == RESET_LEN - 1) begin
+            reset_cnt <= reset_cnt;      // saturate
+            res_n     <= 1'b1;
+        end else begin
             reset_cnt <= reset_cnt + 1'b1;
             res_n     <= 1'b0;
-        end else begin
-            res_n <= 1'b1;
         end
     end
 
@@ -108,15 +120,16 @@ module gba_cart_controller #(
     // Main access state machine
     // ------------------------------------------------------------------
     localparam S_IDLE      = 4'd0;
-    localparam S_ROM       = 4'd1;   // 16-bit ROM read x4 (64-bit response)
-    localparam S_ROM_DONE  = 4'd2;
-    localparam S_SRAM      = 4'd3;   // 8-bit SRAM/Flash byte access (CS2#)
-    localparam S_SRAM_W    = 4'd4;   // write strobe phase
-    localparam S_EEPROM    = 4'd5;   // bit-serial EEPROM forward
-    localparam S_GPIO_A    = 4'd6;   // GPIO 16-bit: address phase
-    localparam S_GPIO_R    = 4'd7;   // GPIO read data phase
-    localparam S_GPIO_W    = 4'd8;   // GPIO write data phase
-    localparam S_DONE      = 4'd9;
+    localparam S_ROM_CS    = 4'd1;   // drive address, then assert CS1#
+    localparam S_ROM_DATA  = 4'd2;   // release AD, strobe RD#, sample 16-bit
+    localparam S_ROM_DONE  = 4'd3;
+    localparam S_SRAM      = 4'd4;   // 8-bit SRAM/Flash byte access (CS2#)
+    localparam S_SRAM_W    = 4'd5;   // write strobe phase
+    localparam S_EEPROM    = 4'd6;   // bit-serial EEPROM forward
+    localparam S_GPIO_A    = 4'd7;   // GPIO 16-bit: address phase
+    localparam S_GPIO_R    = 4'd8;   // GPIO read data phase
+    localparam S_GPIO_W    = 4'd9;   // GPIO write data phase
+    localparam S_DONE      = 4'd10;
 
     reg [3:0]  state;
     reg [1:0]  word_idx;
@@ -125,7 +138,6 @@ module gba_cart_controller #(
     reg [15:0] words [0:3];
     reg [16:0] save_addr_r;
     reg        save_is_write;
-    reg [1:0]  save_type_r;
     reg [15:0] gpio_abs_addr;      // 0x00C4 + {gpio_addr,1'b0}
     reg [3:0]  gpio_din_r;
 
@@ -149,7 +161,8 @@ module gba_cart_controller #(
             save_done       <= 1'b0;
             save_addr_r     <= 17'd0;
             save_is_write   <= 1'b0;
-            save_type_r     <= 2'd0;
+            eeprom_dout     <= 1'b0;
+            eeprom_done     <= 1'b0;
             gpio_abs_addr   <= 16'd0;
             gpio_din_r      <= 4'd0;
             gpio_dout       <= 4'd0;
@@ -173,6 +186,7 @@ module gba_cart_controller #(
         end else begin
             rd_ready  <= 1'b0;
             save_done <= 1'b0;
+            eeprom_done <= 1'b0;
             gpio_done <= 1'b0;
 
             case (state)
@@ -189,13 +203,15 @@ module gba_cart_controller #(
                         byte_addr <= {rd_addr, 2'b00};
                         word_idx  <= 2'd0;
                         acc_cnt   <= 8'd0;
-                        state     <= S_ROM;
+                        state     <= S_ROM_CS;
                     end else if (save_req) begin
                         save_addr_r   <= save_addr;
                         save_is_write <= ~save_rnw;
-                        save_type_r   <= save_type;
                         acc_cnt       <= 8'd0;
-                        state         <= (save_type == 2'd2) ? S_EEPROM : S_SRAM;
+                        state         <= S_SRAM;
+                    end else if (eeprom_req) begin
+                        acc_cnt   <= 8'd0;
+                        state     <= S_EEPROM;
                     end else if (gpio_req) begin
                         gpio_abs_addr <= {8'h00, 2'b00, gpio_addr, 1'b0} + 16'h00C4;
                         gpio_din_r    <= gpio_din;
@@ -204,30 +220,48 @@ module gba_cart_controller #(
                     end
                 end
 
-                // ---- ROM: four 16-bit reads -> 64-bit response ----
-                S_ROM: begin
-                    if (acc_cnt < ADDR_SETUP) begin
-                        out_bank1     <= word_addr[23:16];
-                        out_bank2     <= word_addr[15:8];
-                        out_bank3     <= word_addr[7:0];
-                        out_bank1_dir <= 1'b1;
-                        out_bank2_dir <= 1'b1;
-                        out_bank3_dir <= 1'b1;
-                        cs_n          <= 1'b0;
-                        rd_n          <= 1'b1;
-                        acc_cnt       <= acc_cnt + 1'b1;
-                    end else if (acc_cnt == ADDR_SETUP) begin
+                // ---- ROM: 16-bit read, CS# falling edge latches address ----
+                // Per jojolebarjos/gba-cartridge:
+                //   address must be driven before CS# falls (latched on ~CS edge)
+                //   data sampled before ~RD rising edge; ~RD rising increments
+                //   the latched address internally, but we re-drive it anyway.
+                S_ROM_CS: begin
+                    // Address setup phase: drive full 24-bit address, CS# high.
+                    out_bank1     <= word_addr[23:16];
+                    out_bank2     <= word_addr[15:8];
+                    out_bank3     <= word_addr[7:0];
+                    out_bank1_dir <= 1'b1;
+                    out_bank2_dir <= 1'b1;
+                    out_bank3_dir <= 1'b1;
+                    rd_n          <= 1'b1;
+                    wr_n          <= 1'b1;
+                    cs_n          <= 1'b1;        // default: keep CS# high
+                    if (acc_cnt < ADDR_SETUP - 1) begin
+                        acc_cnt <= acc_cnt + 1'b1;
+                    end else begin
+                        cs_n    <= 1'b0;          // ~CS falling edge latches address
+                        acc_cnt <= 8'd0;
+                        state   <= S_ROM_DATA;
+                    end
+                end
+
+                S_ROM_DATA: begin
+                    if (acc_cnt == 0) begin
+                        // Release AD bus (data comes from cart on AD[15:0])
                         out_bank2_dir <= 1'b0;
                         out_bank3_dir <= 1'b0;
-                        rd_n          <= 1'b0;
-                        acc_cnt       <= acc_cnt + 1'b1;
-                    end else if (acc_cnt == ROM_WAIT - 1) begin
+                        rd_n          <= 1'b0;   // ~RD falling edge fetches data
+                    end
+                    if (acc_cnt == ROM_WAIT - 1) begin
                         words[word_idx] <= {cart_tran_bank2, cart_tran_bank3};
+                        rd_n            <= 1'b1;
+                        cs_n            <= 1'b1;  // end this word's transaction
                         acc_cnt         <= 8'd0;
                         if (word_idx == 2'd3) begin
                             state <= S_ROM_DONE;
                         end else begin
                             word_idx <= word_idx + 1'b1;
+                            state    <= S_ROM_CS;   // next word: re-drive address
                         end
                     end else begin
                         acc_cnt <= acc_cnt + 1'b1;
@@ -247,41 +281,45 @@ module gba_cart_controller #(
                     state          <= S_IDLE;
                 end
 
-                // ---- SRAM / Flash byte access (CS2#, 8-bit data) ----
+                // ---- SRAM / Flash byte access (CS2#) ----
+                // Real GBA SRAM protocol: 16-bit address on AD[15:0],
+                // 8-bit data on A[23:16] (bank1), selected by ~CS2.
                 S_SRAM: begin
-                    out_bank1     <= 8'h0E;                 // A[23:16]
-                    out_bank2     <= save_addr_r[15:8];     // A[15:8]
-                    out_bank1_dir <= 1'b1;
+                    // Address phase: drive AD[15:0], keep A[23:16] tri-state
+                    // (real cart drives data onto A[23:16] only when ~RD low).
+                    out_bank2     <= save_addr_r[15:8];
+                    out_bank3     <= save_addr_r[7:0];
                     out_bank2_dir <= 1'b1;
+                    out_bank3_dir <= 1'b1;
                     cs_n          <= 1'b1;
-                    cs2_n         <= 1'b0;
 
                     if (acc_cnt < ADDR_SETUP) begin
-                        // Address phase: drive A[7:0] on AD low byte
-                        rd_n          <= 1'b1;
+                        out_bank1_dir <= 1'b0;    // data bus input for read
+                        rd_n          <= 1'b1;    // keep ~RD high during address setup
                         wr_n          <= 1'b1;
-                        out_bank3 <= save_addr_r[7:0];
-                        out_bank3_dir <= 1'b1;
-                        acc_cnt  <= acc_cnt + 1'b1;
+                        cs2_n <= 1'b0;            // ~CS2 low selects SRAM/Flash
+                        acc_cnt <= acc_cnt + 1'b1;
                     end else if (save_is_write) begin
-                        // Data phase: hold write data on AD[7:0], strobe WR#
-                        out_bank3 <= save_din;
-                        out_bank3_dir <= 1'b1;
+                        // Data phase: drive write data on A[23:16], strobe WR#
+                        out_bank1     <= save_din;
+                        out_bank1_dir <= 1'b1;
+                        rd_n          <= 1'b1;
                         if (acc_cnt == ADDR_SETUP)
                             wr_n <= 1'b0;
-                        if (acc_cnt == SAVE_WAIT - 1) begin
+                        if (acc_cnt == ADDR_SETUP + SAVE_WAIT - 1) begin
                             wr_n  <= 1'b1;
                             state <= S_DONE;
                         end
                         acc_cnt <= acc_cnt + 1'b1;
                     end else begin
-                        // Read phase: release AD, sample data
-                        out_bank2_dir <= 1'b0;
-                        out_bank3_dir <= 1'b0;
-                        if (acc_cnt == ADDR_SETUP)
+                        // Read phase: release A[23:16], sample data
+                        out_bank1_dir <= 1'b0;
+                        wr_n          <= 1'b1;
+                        if (acc_cnt == ADDR_SETUP) begin
                             rd_n <= 1'b0;
-                        if (acc_cnt == SAVE_WAIT - 1) begin
-                            save_dout <= cart_tran_bank3;
+                        end else if (acc_cnt == ADDR_SETUP + SAVE_WAIT - 1) begin
+                            rd_n      <= 1'b1;
+                            save_dout <= cart_tran_bank1;
                             state     <= S_DONE;
                         end
                         acc_cnt <= acc_cnt + 1'b1;
@@ -289,31 +327,37 @@ module gba_cart_controller #(
                 end
 
                 // ---- EEPROM: bit-serial forward (A23=clk, D0=data, CS2#=cs) ----
-                // Each CPU byte write to the EEPROM region advances one bit:
-                // assert CS2#, pulse A23 (low->high), data on D0.
+                // The real EEPROM chip parses the bit stream itself. Each CPU
+                // access to the EEPROM region advances one bit: assert CS2#,
+                // pulse A23 (low->high), data on D0 (out) / sampled on D0 (in).
                 S_EEPROM: begin
-                    out_bank1_dir <= 1'b1;
-                    out_bank2_dir <= 1'b1;
-                    out_bank3_dir <= 1'b1;
-                    cs_n          <= 1'b1;
-                    cs2_n         <= 1'b0;
-                    rd_n          <= 1'b1;
-                    wr_n          <= 1'b1;
-
-                    if (save_is_write) begin
-                        // Drive D0 with the data bit, A23 low then high (clock pulse)
-                        out_bank1 <= (acc_cnt == 0) ? 8'h0D : 8'h0F;  // A23 toggles
-                        out_bank3 <= {7'b0, save_din[0]};
-                        if (acc_cnt >= 1) begin
-                            state <= S_DONE;
-                        end
-                    end else begin
-                        out_bank1 <= 8'h0F;
+                    if (eeprom_rnw) begin
+                        // Read: drive nothing, pulse A23, sample D0
+                        out_bank1_dir <= 1'b1;
                         out_bank2_dir <= 1'b0;
                         out_bank3_dir <= 1'b0;
-                        if (acc_cnt >= 1) begin
-                            save_dout <= {7'b0, cart_tran_bank3[0]};
-                            state     <= S_DONE;
+                        cs_n          <= 1'b1;
+                        rd_n          <= 1'b1;
+                        wr_n          <= 1'b1;
+                        cs2_n         <= 1'b0;
+                        out_bank1     <= (acc_cnt < EEPROM_HALF_CYCLE) ? 8'h0F : 8'h0D;
+                        if (acc_cnt >= 2*EEPROM_HALF_CYCLE - 1) begin
+                            eeprom_dout <= cart_tran_bank3[0];
+                            state       <= S_DONE;
+                        end
+                    end else begin
+                        // Write: drive D0 with data bit, pulse A23
+                        out_bank1_dir <= 1'b1;
+                        out_bank2_dir <= 1'b0;
+                        out_bank3_dir <= 1'b1;
+                        out_bank3     <= {7'b0, eeprom_din};
+                        cs_n          <= 1'b1;
+                        rd_n          <= 1'b1;
+                        wr_n          <= 1'b1;
+                        cs2_n         <= 1'b0;
+                        out_bank1     <= (acc_cnt < EEPROM_HALF_CYCLE) ? 8'h0F : 8'h0D;
+                        if (acc_cnt >= 2*EEPROM_HALF_CYCLE - 1) begin
+                            state <= S_DONE;
                         end
                     end
                     acc_cnt <= acc_cnt + 1'b1;
@@ -368,9 +412,10 @@ module gba_cart_controller #(
                     out_bank1_dir <= 1'b0;
                     out_bank2_dir <= 1'b0;
                     out_bank3_dir <= 1'b0;
-                    save_done <= 1'b1;
-                    gpio_done <= 1'b1;
-                    state     <= S_IDLE;
+                    save_done   <= 1'b1;
+                    eeprom_done <= 1'b1;
+                    gpio_done   <= 1'b1;
+                    state       <= S_IDLE;
                 end
 
                 default: state <= S_IDLE;

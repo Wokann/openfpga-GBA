@@ -238,9 +238,11 @@ assign bridge_endian_little = 0;
 wire        han_rom_cart_mode;
 wire        han_save_cart_mode;
 wire        han_gpio_cart_mode;
+wire        han_eeprom_cart_mode;
 assign han_rom_cart_mode  = 1'b0;   // TODO(CHIP32): switch from IO bridge
 assign han_save_cart_mode = 1'b1;   // 迂回汉化：存档读写走卡带槽实体卡带
 assign han_gpio_cart_mode = 1'b1;   // 迂回汉化：RTC/震动/太阳/陀螺走卡带硬件
+assign han_eeprom_cart_mode = 1'b1; // 迂回汉化：EEPROM 位流走卡带槽实体芯片
 
 wire        han_cart_rd_req;
 wire [24:0] han_cart_rd_addr;
@@ -254,7 +256,6 @@ wire        han_cart_save_rnw;
 wire [7:0]  han_cart_save_din;
 wire [7:0]  han_cart_save_dout;
 wire        han_cart_save_done;
-wire [1:0]  han_cart_save_type;
 
 wire        han_cart_gpio_req;
 wire        han_cart_gpio_rnw;
@@ -262,6 +263,12 @@ wire [1:0]  han_cart_gpio_addr;
 wire [3:0]  han_cart_gpio_din;
 wire [3:0]  han_cart_gpio_dout;
 wire        han_cart_gpio_done;
+// HAN EEPROM bit-serial request bus (gba_top <-> cartridge controller)
+wire        han_cart_eeprom_req;
+wire        han_cart_eeprom_rnw;
+wire        han_cart_eeprom_din;
+wire        han_cart_eeprom_dout;
+wire        han_cart_eeprom_done;
 
 wire        han_cart_present;
 
@@ -296,13 +303,17 @@ gba_cart_controller #(
     .save_din               ( han_cart_save_din ),
     .save_dout              ( han_cart_save_dout ),
     .save_done              ( han_cart_save_done ),
-    .save_type              ( han_cart_save_type ),
     .gpio_req               ( han_cart_gpio_req ),
     .gpio_rnw               ( han_cart_gpio_rnw ),
     .gpio_addr              ( han_cart_gpio_addr ),
     .gpio_din               ( han_cart_gpio_din ),
     .gpio_dout              ( han_cart_gpio_dout ),
     .gpio_done              ( han_cart_gpio_done ),
+    .eeprom_req             ( han_cart_eeprom_req ),
+    .eeprom_rnw             ( han_cart_eeprom_rnw ),
+    .eeprom_din             ( han_cart_eeprom_din ),
+    .eeprom_dout            ( han_cart_eeprom_dout ),
+    .eeprom_done            ( han_cart_eeprom_done ),
     .cart_present           ( han_cart_present ),
     .err_count              (  )
 );
@@ -312,6 +323,9 @@ wire        gba_gpio_read_ena, gba_gpio_write_ena, gba_gpio_done_in_w;
 wire [1:0]  gba_gpio_addr;
 wire [3:0]  gba_gpio_dout_w, gba_gpio_din_w;
 wire        gba_save_sram, gba_save_flash, gba_save_eeprom;
+// HAN EEPROM bridge signals (gba_top <-> core_top)
+wire        gba_eeprom_req_w, gba_eeprom_rnw_w, gba_eeprom_din_w;
+wire        gba_eeprom_dout_w, gba_eeprom_done_w;
 
 // GPIO requests from gba_top -> cartridge controller
 assign han_cart_gpio_req  = gba_gpio_read_ena | gba_gpio_write_ena;
@@ -323,8 +337,13 @@ assign han_cart_gpio_din  = gba_gpio_dout_w;
 assign gba_gpio_din_w     = han_gpio_cart_mode ? han_cart_gpio_dout : 4'd0;
 assign gba_gpio_done_in_w = han_gpio_cart_mode ? han_cart_gpio_done : 1'b0;
 
-// Save protocol select: EEPROM > Flash > SRAM
-assign han_cart_save_type = gba_save_eeprom ? 2'd2 : (gba_save_flash ? 2'd1 : 2'd0);
+// EEPROM requests from gba_top -> cartridge controller (bit-serial forward)
+assign han_cart_eeprom_req = gba_eeprom_req_w;
+assign han_cart_eeprom_rnw = gba_eeprom_rnw_w;
+assign han_cart_eeprom_din = gba_eeprom_din_w;
+// Responses back to gba_top (meaningful only in cart mode)
+assign gba_eeprom_dout_w   = han_eeprom_cart_mode ? han_cart_eeprom_dout : 1'b0;
+assign gba_eeprom_done_w   = han_eeprom_cart_mode ? han_cart_eeprom_done : 1'b0;
 
 // ---- Link Cable ----
 // Supported: 2-player multi-player mode on SD/SC with SO/SI terminal detect.
@@ -1736,6 +1755,13 @@ gba_top #(
     .GPIO_Dout_out       ( gba_gpio_dout_w ),
     .GPIO_Din_in         ( gba_gpio_din_w ),
     .GPIO_done_in        ( gba_gpio_done_in_w ),
+    // HAN EEPROM bridge (cart hardware mode)
+    .EEPROM_cart_mode    ( han_eeprom_cart_mode ),
+    .EEPROM_ext_req_out  ( gba_eeprom_req_w ),
+    .EEPROM_ext_rnw_out  ( gba_eeprom_rnw_w ),
+    .EEPROM_ext_din_out  ( gba_eeprom_din_w ),
+    .EEPROM_ext_dout_in  ( gba_eeprom_dout_w ),
+    .EEPROM_ext_done_in  ( gba_eeprom_done_w ),
     // SDRAM (ROM reads — muxed with staging in sdram_pocket section)
     .sdram_read_ena      ( sdram_read_req_gba ),
     .sdram_read_done     ( ss_serving_active ? 1'b0 : rom_rd_ready ),
