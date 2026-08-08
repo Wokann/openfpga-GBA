@@ -41,9 +41,12 @@ module gba_cart_controller #(
     parameter integer EEPROM_HALF_CYCLE = 50, // clk_sys cycles per RD#/WR# half pulse
     parameter integer EEPROM_ADDR_SETUP = 16, // clk_sys cycles A23/D0 stable
                                              // before CS# falls (EEPROM)
-    parameter integer RELEASE_DELAY = 4,     // clk_sys cycles CS2# stays low
-                                             // after WR#/RD# rise (write
-                                             // recovery, real Flash needs it)
+    // CS#/CS2# stay low for this many clk_sys cycles after WR#/RD# rise.
+    // 32 cycles = 320 ns @100 MHz. Real Flash needs 30-50 ns write recovery,
+    // and the ROM-chip GPIO block latches on a PHI edge: with a 4.19 MHz PHI
+    // (238 ns period) the CS1# hold must cover at least one PHI cycle or the
+    // GPIO register write is dropped.
+    parameter integer RELEASE_DELAY = 32,
     parameter integer EEPROM_SESS_TIMEOUT = 1024, // clk_sys cycles without EEPROM
                                                   // access before releasing CS2#/A23
     parameter integer RESET_LEN  = 4096
