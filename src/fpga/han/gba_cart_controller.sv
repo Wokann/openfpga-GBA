@@ -7,8 +7,11 @@
 //   - ROM reads  : 16-bit, CS1#, read-only   (used by rom_source_mux)
 //   - Save access: 8-bit SRAM/Flash via CS2# (Flash commands are forwarded
 //                  to the cart chip, which executes them itself)
-//   - EEPROM     : bit-serial via A23/RAMCS/D0 (per-bit forward, the real
-//                  EEPROM chip executes the command itself)
+//   - EEPROM     : bit-serial via ROMCS#/A23/D0 (per-bit forward, the real
+//                  EEPROM chip executes the command itself). GBATEK
+//                  "Pin-Outs": EEPROM pins 1..8 connect to ROMCS, RD, WR,
+//                  AD0, GND, GND, A23, VDD — the chip-select is ROMCS
+//                  (Pin 5 / CS1#), NOT CS2# (Pin 30).
 //   - GPIO access: 16-bit R/W at 0x080000C4..0x080000C8 (RTC, solar, gyro,
 //                  rumble cart hardware)
 //
@@ -33,7 +36,10 @@ module gba_cart_controller #(
     parameter integer ROM_WAIT   = 24,  // clk_sys cycles per 16-bit ROM read
     parameter integer SAVE_WAIT  = 54,  // clk_sys cycles per 8-bit SRAM/Flash access
     parameter integer ADDR_SETUP = 4,   // clk_sys cycles driving address
-    parameter integer EEPROM_HALF_CYCLE = 4, // clk_sys cycles per RD#/WR# half pulse
+    // insideGadgets GBxCartRead Part 3 measured the real GBA EEPROM bit
+    // clock at ~600 ns full period (~300 ns half). At 100 MHz that is
+    // ~30 clk_sys per half pulse; keep a little margin.
+    parameter integer EEPROM_HALF_CYCLE = 32, // clk_sys cycles per RD#/WR# half pulse
     parameter integer EEPROM_SESS_TIMEOUT = 1024, // clk_sys cycles without EEPROM
                                                   // access before releasing CS2#/A23
     parameter integer RESET_LEN  = 4096
@@ -220,6 +226,8 @@ module gba_cart_controller #(
                         // arriving; close it after EEPROM_SESS_TIMEOUT cycles
                         // of inactivity (DMA finished / paused).
                         cs2_n         <= 1'b0;
+                        cs_n          <= 1'b0;    // ROMCS stays low (EEPROM /CS)
+                        cs2_n         <= 1'b1;    // pin30 stays RES# high
                         out_bank1     <= 8'h80;   // A23 = 1
                         out_bank1_dir <= 1'b1;
                         if (eeprom_sess_cnt == EEPROM_SESS_TIMEOUT - 1) begin
@@ -228,6 +236,7 @@ module gba_cart_controller #(
                             eeprom_sess_cnt <= eeprom_sess_cnt + 1'b1;
                         end
                     end else begin
+                        cs_n          <= 1'b1;
                         cs2_n         <= 1'b1;
                         out_bank1_dir <= 1'b0;
                     end
@@ -251,7 +260,10 @@ module gba_cart_controller #(
                         state           <= S_EEPROM;
                     end else if (gpio_req) begin
                         eeprom_sess     <= 1'b0;
-                        gpio_abs_addr <= {8'h00, 2'b00, gpio_addr, 1'b0} + 16'h00C4;
+                        // Halfword address: 0x080000C4..0x080000C8 (byte) >> 1
+                        // = 0x04000062..0x04000064. The cartridge bus always
+                        // carries halfword addresses for ROM-space access.
+                        gpio_abs_addr <= 16'h0062 + {14'd0, gpio_addr};
                         gpio_din_r    <= gpio_din;
                         acc_cnt       <= 8'd0;
                         state         <= S_GPIO_A;
@@ -336,31 +348,40 @@ module gba_cart_controller #(
                         rd_n          <= 1'b1;    // keep ~RD high during address setup
                         wr_n          <= 1'b1;
                         cs2_n <= 1'b0;            // ~CS2 low selects SRAM/Flash
+                        if (save_is_write && acc_cnt == ADDR_SETUP - 1) begin
+                            // Pre-drive write data on A[23:16] one cycle before
+                            // ~WR falls so the chip samples stable data.
+                            out_bank1     <= save_din;
+                            out_bank1_dir <= 1'b1;
+                        end
                         acc_cnt <= acc_cnt + 1'b1;
                     end else if (save_is_write) begin
                         // Data phase: drive write data on A[23:16], strobe WR#
-                        out_bank1     <= save_din;
-                        out_bank1_dir <= 1'b1;
                         rd_n          <= 1'b1;
                         if (acc_cnt == ADDR_SETUP)
                             wr_n <= 1'b0;
                         if (acc_cnt == ADDR_SETUP + SAVE_WAIT - 1) begin
                             wr_n  <= 1'b1;
-                            state <= S_DONE;
+                            acc_cnt <= 8'd0;
+                            state   <= S_DONE;
+                        end else begin
+                            acc_cnt <= acc_cnt + 1'b1;
                         end
-                        acc_cnt <= acc_cnt + 1'b1;
                     end else begin
                         // Read phase: release A[23:16], sample data
                         out_bank1_dir <= 1'b0;
                         wr_n          <= 1'b1;
                         if (acc_cnt == ADDR_SETUP) begin
                             rd_n <= 1'b0;
-                        end else if (acc_cnt == ADDR_SETUP + SAVE_WAIT - 1) begin
+                        end
+                        if (acc_cnt == ADDR_SETUP + SAVE_WAIT - 1) begin
                             rd_n      <= 1'b1;
                             save_dout <= cart_tran_bank1;
+                            acc_cnt   <= 8'd0;
                             state     <= S_DONE;
+                        end else begin
+                            acc_cnt <= acc_cnt + 1'b1;
                         end
-                        acc_cnt <= acc_cnt + 1'b1;
                     end
                 end
 
@@ -369,15 +390,16 @@ module gba_cart_controller #(
                 // Per GBATEK "GBA Cart Backup EEPROM": during the whole DMA
                 // transfer the cart sees /CS=LOW and A23=HIGH, and each bit is
                 // driven by one 16-bit DMA access (RD# for reads, WR# for
-                // writes), data on AD0. We forward one bit per request.
+                // writes), data on AD0. /CS is ROMCS (Pin 5), not CS2#.
+                // We forward one bit per request.
                 S_EEPROM: begin
                     // A23 (=bank1[7]) stays HIGH during the whole transfer,
                     // as on the real GBA bus when addressing 0x0Dxxxxxx.
                     out_bank1     <= 8'h80;
                     out_bank1_dir <= 1'b1;
                     out_bank2_dir <= 1'b0;
-                    cs_n          <= 1'b1;
-                    cs2_n         <= 1'b0;   // ROMCS low for whole transfer
+                    cs_n          <= 1'b0;   // ROMCS low for whole transfer
+                    cs2_n         <= 1'b1;   // pin30 stays RES# high
                     if (eeprom_rnw) begin
                         // Read bit: RD# low pulse, sample D0 before release.
                         out_bank3_dir <= 1'b0;
@@ -389,35 +411,45 @@ module gba_cart_controller #(
                             rd_n        <= 1'b1;
                         end
                         if (acc_cnt >= EEPROM_HALF_CYCLE) begin
-                            state <= S_DONE;
+                            acc_cnt <= 8'd0;
+                            state   <= S_DONE;
+                        end else begin
+                            acc_cnt <= acc_cnt + 1'b1;
                         end
                     end else begin
                         // Write bit: D0 driven with data, WR# low pulse.
-                        out_bank3     <= {7'b0, eeprom_din};
-                        out_bank3_dir <= 1'b1;
                         rd_n          <= 1'b1;
-                        if (acc_cnt < EEPROM_HALF_CYCLE)
+                        if (acc_cnt == 0) begin
+                            // Drive D0 one cycle before WR# falls (setup).
+                            out_bank3     <= {7'b0, eeprom_din};
+                            out_bank3_dir <= 1'b1;
+                        end
+                        if ((acc_cnt >= 1) && (acc_cnt < EEPROM_HALF_CYCLE))
                             wr_n <= 1'b0;
                         if (acc_cnt >= EEPROM_HALF_CYCLE) begin
-                            wr_n  <= 1'b1;
-                            state <= S_DONE;
+                            wr_n    <= 1'b1;
+                            acc_cnt <= 8'd0;
+                            state   <= S_DONE;
+                        end else begin
+                            acc_cnt <= acc_cnt + 1'b1;
                         end
                     end
-                    acc_cnt <= acc_cnt + 1'b1;
                 end
 
                 // ---- GPIO: 16-bit R/W at 0x080000C4..0x080000C8 ----
                 S_GPIO_A: begin
-                    out_bank1     <= 8'h08;
+                    // Halfword address: 0x04000062 + reg (see gpio_abs_addr).
+                    out_bank1     <= 8'h04;      // A[23:16] of halfword address
                     out_bank2     <= gpio_abs_addr[15:8];
                     out_bank3     <= gpio_abs_addr[7:0];
                     out_bank1_dir <= 1'b1;
                     out_bank2_dir <= 1'b1;
                     out_bank3_dir <= 1'b1;
-                    cs_n          <= 1'b0;
+                    cs_n          <= 1'b1;      // address setup, CS# high
                     rd_n          <= 1'b1;
                     wr_n          <= 1'b1;
                     if (acc_cnt == ADDR_SETUP - 1) begin
+                        cs_n <= 1'b0;           // CS# falling edge latches addr
                         state <= gpio_rnw ? S_GPIO_R : S_GPIO_W;
                         acc_cnt <= 8'd0;
                     end else begin
@@ -431,9 +463,11 @@ module gba_cart_controller #(
                     rd_n          <= 1'b0;
                     if (acc_cnt == SAVE_WAIT - 1) begin
                         gpio_dout <= cart_tran_bank3[3:0];
+                        acc_cnt   <= 8'd0;
                         state     <= S_DONE;
+                    end else begin
+                        acc_cnt <= acc_cnt + 1'b1;
                     end
-                    acc_cnt <= acc_cnt + 1'b1;
                 end
 
                 S_GPIO_W: begin
@@ -441,10 +475,12 @@ module gba_cart_controller #(
                     out_bank3_dir <= 1'b1;
                     wr_n          <= 1'b0;
                     if (acc_cnt == SAVE_WAIT - 1) begin
-                        wr_n  <= 1'b1;
-                        state <= S_DONE;
+                        wr_n    <= 1'b1;
+                        acc_cnt <= 8'd0;
+                        state   <= S_DONE;
+                    end else begin
+                        acc_cnt <= acc_cnt + 1'b1;
                     end
-                    acc_cnt <= acc_cnt + 1'b1;
                 end
 
                 S_DONE: begin
@@ -453,20 +489,28 @@ module gba_cart_controller #(
                     wr_n  <= 1'b1;
                     out_bank2_dir <= 1'b0;
                     out_bank3_dir <= 1'b0;
-                    if (eeprom_sess) begin
-                        // Keep /CS LOW and A23 HIGH across consecutive EEPROM
-                        // bit accesses (GBATEK requirement for DMA3).
-                        cs2_n         <= 1'b0;
-                        out_bank1     <= 8'h80;
-                        out_bank1_dir <= 1'b1;
+                    if (acc_cnt == 0) begin
+                        // Release RD#/WR# first while CS2# (SRAM/Flash select)
+                        // stays low; real SRAM samples data on the WR# rising
+                        // edge and needs CS2# low at that moment.
+                        acc_cnt <= acc_cnt + 1'b1;
                     end else begin
-                        cs2_n         <= 1'b1;
-                        out_bank1_dir <= 1'b0;
+                        if (eeprom_sess) begin
+                            // Keep /CS LOW and A23 HIGH across consecutive
+                            // EEPROM bit accesses (GBATEK requirement for DMA3).
+                            cs_n          <= 1'b0;
+                            out_bank1     <= 8'h80;
+                            out_bank1_dir <= 1'b1;
+                        end else begin
+                            cs_n          <= 1'b1;
+                            out_bank1_dir <= 1'b0;
+                        end
+                        cs2_n         <= 1'b1;   // release CS2# one cycle later
+                        save_done     <= 1'b1;
+                        eeprom_done   <= 1'b1;
+                        gpio_done     <= 1'b1;
+                        state         <= S_IDLE;
                     end
-                    save_done   <= 1'b1;
-                    eeprom_done <= 1'b1;
-                    gpio_done   <= 1'b1;
-                    state       <= S_IDLE;
                 end
 
                 default: state <= S_IDLE;
@@ -489,8 +533,12 @@ module gba_cart_controller #(
     assign cart_tran_bank0     = {PHI_ENABLE ? phi : 1'b1, wr_n, rd_n, cs_n};
     assign cart_tran_bank0_dir = 1'b1;
 
-    // pin30: CS2#/RES# — CS2# active during save/EEPROM accesses, else RES#
-    assign cart_tran_pin30        = ((state == S_SRAM) || (state == S_EEPROM) || eeprom_sess) ? cs2_n : res_n;
+    // pin30: CS2#/RES# — CS2# active during SRAM/Flash accesses and for one
+    // extra cycle in S_DONE (so WR#/RD# rise while CS2# is still low, as real
+    // SRAM chips require); during EEPROM transfers pin30 stays at RES#
+    // (EEPROM /CS is ROMCS, Pin 5).
+    assign cart_tran_pin30        = ((state == S_SRAM) ||
+                                     ((state == S_DONE) && (acc_cnt == 8'd0))) ? cs2_n : res_n;
     assign cart_tran_pin30_dir    = 1'b1;
     assign cart_pin30_pwroff_reset = 1'b0;
 

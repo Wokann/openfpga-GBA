@@ -15,10 +15,7 @@ module cart_rom_model (
     wire rd_n  = bank0[1];
     wire cs_n  = bank0[0];
     wire wr_n  = bank0[2];
-    // pin30 is CS2#/RES#. During cart accesses CS2# is actively driven low;
-    // only treat it as a save/EEPROM select when the controller is not in
-    // its power-on reset phase (detect via wr/rd activity instead of the
-    // absolute pin level).
+    // pin30 is CS2#/RES# 鈥?SRAM/Flash select only.
     wire cs2_n = pin30;
 
     // Address latch on CS1# falling edge (real cart latches A0-A23 there).
@@ -47,37 +44,44 @@ module cart_rom_model (
     end
     wire [7:0] sram_dout = sram_mem[sram_addr_latch];
 
-    // GPIO (16-bit access at 0x080000C4.., data in D3..D0)
+    // GPIO (16-bit access at 0x080000C4.. = halfword 0x04000062..,
+    //       data in D3..D0)
     reg [3:0] gpio_reg [0:2];
     initial begin gpio_reg[0] = 4'h5; gpio_reg[1] = 4'h9; gpio_reg[2] = 4'h3; end
     reg [23:0] gpio_addr_latch;
     always @(negedge cs_n) begin
-        if (bank1 == 8'h08)
+        if (bank1 == 8'h04)
             gpio_addr_latch <= {bank1, bank2, bank3};
     end
-    wire [1:0] gpio_idx = (gpio_addr_latch[7:0] - 8'hC4) >> 1;
+    // Decode halfword addresses 0x04000062/63/64 (GBA byte 0x080000C4/6/8).
+    // Note: every ROM access in 0x04000000..0x04FFFFFF has A[23:16]=0x04, so
+    // also check the low 16 bits to avoid aliasing normal ROM reads.
+    wire       gpio_sel = (gpio_addr_latch[23:16] == 8'h04) &&
+                          (gpio_addr_latch[7:0] >= 8'h62) &&
+                          (gpio_addr_latch[7:0] <= 8'h64);
+    wire [1:0] gpio_idx = gpio_addr_latch[7:0] - 8'h62;  // 0x62/0x63/0x64 -> 0..2
     always @(posedge wr_n) begin
-        if (!cs_n && gpio_addr_latch[23:16] == 8'h08 && gpio_idx <= 2'd2)
+        if (!cs_n && gpio_sel)
             gpio_reg[gpio_idx] <= bank3[3:0];
     end
 
-    // EEPROM: tiny model. While CS2# is low and A23 high, each RD# pulse
+    // EEPROM: tiny model. While ROMCS# is low and A23 high, each RD# pulse
     // presents the next bit on D0; each WR# pulse samples D0. We return a
     // toggling pattern so the read handshake is observable.
-    // eeprom_active distinguishes EEPROM (A23 latched high at CS2# falling
-    // edge) from SRAM accesses so the two don't fight over bank1/bank3.
+    // eeprom_active distinguishes EEPROM (A23 latched high at CS1# falling
+    // edge) from normal ROM accesses so the model drives D0 only for EEPROM.
     reg eeprom_d0_out;
     reg eeprom_active;
     initial eeprom_d0_out = 1'b0;
     initial eeprom_active = 1'b0;
-    always @(negedge cs2_n) begin
+    always @(negedge cs_n) begin
         eeprom_active <= (bank1[7] === 1'b1);
     end
-    always @(posedge cs2_n) begin
+    always @(posedge cs_n) begin
         eeprom_active <= 1'b0;
     end
     always @(negedge rd_n) begin
-        if (!cs2_n && eeprom_active)
+        if (!cs_n && eeprom_active)
             eeprom_d0_out <= ~eeprom_d0_out;
     end
 
@@ -85,13 +89,13 @@ module cart_rom_model (
     reg [7:0] bank3_drv;
     reg       bank3_en;
     always @(*) begin
-        if (!rd_n && !cs_n && gpio_addr_latch[23:16] == 8'h08) begin
+        if (!rd_n && !cs_n && gpio_sel) begin
             bank3_drv = {4'b0, gpio_reg[gpio_idx]};
             bank3_en  = 1'b1;
         end else if (!rd_n && !cs_n) begin
             bank3_drv = rom_dout[7:0];
             bank3_en  = 1'b1;
-        end else if (!cs2_n && cs_n && eeprom_active && !rd_n && wr_n) begin
+        end else if (!cs_n && eeprom_active && !rd_n && wr_n) begin
             bank3_drv = {7'b0, eeprom_d0_out};
             bank3_en  = 1'b1;
         end else begin
@@ -276,11 +280,11 @@ module tb_gba_cart_controller;
         wait (eeprom_done);
         @(posedge clk);
 
-        // ---- EEPROM session hold: consecutive bits must keep CS2# low / A23 high ----
+        // ---- EEPROM session hold: consecutive bits must keep CS1# low / A23 high ----
         // First bit just completed; session is still open (within timeout).
-        if (cart_tran_pin30 !== 1'b0 || cart_tran_bank1 !== 8'h80) begin
-            $display("FAIL: EEPROM session not held after bit (pin30=%b bank1=%h)",
-                     cart_tran_pin30, cart_tran_bank1);
+        if (cart_tran_bank0[0] !== 1'b0 || cart_tran_bank1 !== 8'h80) begin
+            $display("FAIL: EEPROM session not held after bit (cs1=%b bank1=%h)",
+                     cart_tran_bank0[0], cart_tran_bank1);
             errors = errors + 1;
         end
         @(posedge clk);
@@ -290,16 +294,16 @@ module tb_gba_cart_controller;
         wait (eeprom_done);
         @(posedge clk);
         // Session should still be held during the burst.
-        if (cart_tran_pin30 !== 1'b0 || cart_tran_bank1 !== 8'h80) begin
-            $display("FAIL: EEPROM session dropped mid-burst (pin30=%b bank1=%h)",
-                     cart_tran_pin30, cart_tran_bank1);
+        if (cart_tran_bank0[0] !== 1'b0 || cart_tran_bank1 !== 8'h80) begin
+            $display("FAIL: EEPROM session dropped mid-burst (cs1=%b bank1=%h)",
+                     cart_tran_bank0[0], cart_tran_bank1);
             errors = errors + 1;
         end
         // Let the session timeout expire, then verify release.
         repeat (1100) @(posedge clk);
-        if (cart_tran_pin30 !== 1'b1) begin
-            $display("FAIL: EEPROM session not released after timeout (pin30=%b)",
-                     cart_tran_pin30);
+        if (cart_tran_bank0[0] !== 1'b1) begin
+            $display("FAIL: EEPROM session not released after timeout (cs1=%b)",
+                     cart_tran_bank0[0]);
             errors = errors + 1;
         end
 
@@ -322,3 +326,4 @@ module tb_gba_cart_controller;
         $finish;
     end
 endmodule
+
