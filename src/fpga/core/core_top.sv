@@ -1740,7 +1740,10 @@ gba_top #(
     .save_state          ( ss_save ),
     .load_state          ( ss_load ),
     .maxpixels           ( quirk_sprite ),
-    .specialmodule       ( quirk_gpio | force_rtc_s ),
+    // 迂回汉化：GPIO/RTC 走实体卡带硬件，必须强制启用 specialmodule
+    // （否则仅数据库 quirk 或手动 force_rtc 的游戏才会路由 GPIO 访问，
+    // 卡带 RTC 请求根本不会发到卡带控制器）
+    .specialmodule       ( han_gpio_cart_mode | quirk_gpio | force_rtc_s ),
     // solar/tilt/rumble removed to save ALMs
     .savestate_number    ( 0 ),
     // RTC
