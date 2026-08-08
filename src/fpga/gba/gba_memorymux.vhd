@@ -161,6 +161,7 @@ architecture arch of gba_memorymux is
       READ_UNREADABLE,
       ROTATE,
       READ_GPIO,
+      WRITE_GPIO,
       WAIT_WRAMREADMODIFYWRITE,
       WRITE_WRAMLARGE,
       WRITE_WRAMSMALL,
@@ -627,14 +628,22 @@ begin
                         when x"6" => state <= WRITE_VRAM;      mem_bus_done <= not vram_blocked or adr_save(16); vramwait <= vram_blocked;
                         when x"7" => state <= WRITE_OAM;       mem_bus_done <= '1';
                         when x"8" =>
-                           mem_bus_done <= '1';
-                           state        <= IDLE;
                            if (specialmodule = '1') then
                               if (unsigned(adr_save) >= 16#80000C4# and unsigned(adr_save) <= 16#80000C8#) then
                                  GPIO_writeEna <= '1';
                                  GPIO_addr     <= std_logic_vector(to_unsigned(to_integer(unsigned(adr_save(3 downto 1))) - 4 / 2, 2));
                                  GPIO_Dout     <= Dout_save(3 downto 0);
+                                 -- HAN 迂回：等待卡带控制器完成写（与读一致），
+                                 -- 否则 RTC 初始化连续写会丢失请求
+                                 mem_bus_done <= '0';
+                                 state        <= WRITE_GPIO;
+                              else
+                                 mem_bus_done <= '1';
+                                 state        <= IDLE;
                               end if;
+                           else
+                              mem_bus_done <= '1';
+                              state        <= IDLE;
                            end if;
 
                         when x"D" => state <= EEPROMWRITE;
@@ -916,7 +925,16 @@ begin
                   state <= IDLE;
                end if;
                
-            
+            when WRITE_GPIO =>
+               -- HAN 迂回：GPIO 写等待卡带控制器完成（GPIO_writeEna 为
+               -- 单周期脉冲，进入本状态即清除）
+               GPIO_writeEna <= '0';
+               if (GPIO_done = '1') then
+                  mem_bus_done <= '1';
+                  state        <= IDLE;
+               end if;
+               
+           
             ----- writing
             
             when WAIT_WRAMREADMODIFYWRITE =>
