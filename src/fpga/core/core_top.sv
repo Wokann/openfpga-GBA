@@ -276,7 +276,7 @@ wire        han_cart_eeprom_done;
 wire        han_cart_present;
 
 gba_cart_controller #(
-    .PHI_DIV   (6),
+    .PHI_DIV_16M(6),
     .ROM_WAIT  (40),
     .ADDR_SETUP(16)
 ) u_gba_cart (
