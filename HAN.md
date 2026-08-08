@@ -8,6 +8,8 @@
 
 - **迂回汉化（当前实现重点）**：运行 SD 卡中的 GBA ROM（汉化版），存档与扩展
   硬件（RTC/震动/太阳感应/陀螺仪）全部通过 Pocket 卡带槽上的实体卡带读写。
+  迂回模式下 **SD 存档完全不参与**：向 Pocket 报告 save_size=0，启动时不加载
+  SD 存档、退出时也不写回 SD，SD 上的 .sav 文件不被触碰，存档只存在于卡带。
 - **外挂汉化（规划中）**：运行实体卡带 ROM，SD 卡存放 IPS/UPS 补丁，核心实时
   替换 ROM 数据。
 
@@ -31,6 +33,8 @@
 
 - 卡带槽引脚由 `u_gba_cart` 驱动（原为闲置高阻）
 - `bus_out` 存档访问：`han_save_cart_mode=1` 时路由到卡带控制器
+- 存档写回（Pocket OS）：迂回模式下 save_size 报告为 0，Pocket 不读不写
+  SD 存档；`save_mem_ready` 直通，核心启动不等待 PSRAM 存档区就绪
 - GPIO：`gba_top.vhd` 新增 GPIO 桥端口，`han_gpio_cart_mode=1` 时由卡带控制器应答
 - EEPROM：`gba_memorymux.vhd` 新增 `EEPROM_cart_mode` 位级转发端口，
   `gba_top.vhd`/`core_top.sv` 打通链路，`han_eeprom_cart_mode=1` 时启用

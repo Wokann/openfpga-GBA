@@ -576,7 +576,8 @@ reg  [16:0] clr_addr;    // [16]=done flag, [15:0]=word addr (128 KB = 64K words
 reg         clr_wr;       // 1-cycle write pulse
 reg         clr_guard;    // 1-cycle guard for psram_busy propagation
 wire        save_clear_done = clr_addr[16];
-wire        save_mem_ready  = save_data_received | save_clear_done;
+// 迂回汉化：存档走卡带，PSRAM die1 不参与，无需等待加载/清除完成。
+wire        save_mem_ready  = han_save_cart_mode | save_data_received | save_clear_done;
 
 always @(posedge clk_sys) begin
     clr_wr <= 0;
@@ -1462,8 +1463,12 @@ synch_3 gpio_quirk_sync (
 // sizes match the actual save type sizes. No 4× DWORD expansion.
 // Only add 16 bytes for RTC data when the game uses GPIO/RTC or force_rtc is on.
 wire        rtc_active = gpio_quirk_s | force_rtc;
-wire [31:0] save_size_bytes = flash_1m_s ? (32'h0002_0000 + (rtc_active ? 32'd16 : 32'd0)) :
-                                           (32'h0001_0000 + (rtc_active ? 32'd16 : 32'd0));
+// 迂回汉化：存档/GPIO 全部走实体卡带，SD 存档不参与。向 Pocket 报告
+// save_size=0，这样启动时 Pocket 不加载 SD 存档、退出时也不写回 SD，
+// 卡带存档不会被 SD 旧数据覆盖，SD 上的 .sav 文件也不被触碰。
+wire [31:0] save_size_bytes = han_save_cart_mode ? 32'd0 :
+                              (flash_1m_s ? (32'h0002_0000 + (rtc_active ? 32'd16 : 32'd0)) :
+                                            (32'h0001_0000 + (rtc_active ? 32'd16 : 32'd0)));
 
 // Continuously drive datatable port A with save size.
 // Writing every cycle is intentional: the Pocket OS may write to the same
