@@ -50,13 +50,13 @@ module cart_rom_model (
     initial begin gpio_reg[0] = 4'h5; gpio_reg[1] = 4'h9; gpio_reg[2] = 4'h3; end
     reg [23:0] gpio_addr_latch;
     always @(negedge cs_n) begin
-        if (bank1 == 8'h04)
-            gpio_addr_latch <= {bank1, bank2, bank3};
+        gpio_addr_latch <= #2 {bank1, bank2, bank3};
     end
     // Decode halfword addresses 0x04000062/63/64 (GBA byte 0x080000C4/6/8).
-    // Note: every ROM access in 0x04000000..0x04FFFFFF has A[23:16]=0x04, so
-    // also check the low 16 bits to avoid aliasing normal ROM reads.
-    wire       gpio_sel = (gpio_addr_latch[23:16] == 8'h04) &&
+    // The cartridge bus carries only the low 24 bits of the halfword address,
+    // so 0x04000062 arrives as A[23:0] = 0x000062 (A[23:16] = 0x00); the 0x04
+    // prefix lives above the 24-bit bus and is not visible to the cart.
+    wire       gpio_sel = (gpio_addr_latch[15:8] == 8'h00) &&
                           (gpio_addr_latch[7:0] >= 8'h62) &&
                           (gpio_addr_latch[7:0] <= 8'h64);
     wire [1:0] gpio_idx = gpio_addr_latch[7:0] - 8'h62;  // 0x62/0x63/0x64 -> 0..2

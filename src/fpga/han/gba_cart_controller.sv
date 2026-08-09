@@ -13,7 +13,11 @@
 //                  AD0, GND, GND, A23, VDD — the chip-select is ROMCS
 //                  (Pin 5 / CS1#), NOT CS2# (Pin 30).
 //   - GPIO access: 16-bit R/W at 0x080000C4..0x080000C8 (RTC, solar, gyro,
-//                  rumble cart hardware)
+//                  rumble cart hardware). These are plain ROM-area bus
+//                  accesses: CS1# falls to latch the halfword address, then
+//                  RD#/WR# pulse with data on D3..D0. The register block is
+//                  inside the cart's ROM chip, so no protocol is emulated -
+//                  we only drive the bus cycles.
 //
 // Timing is modeled on the measured cartridge protocol from
 //   https://github.com/jojolebarjos/gba-cartridge
@@ -36,16 +40,14 @@ module gba_cart_controller #(
     parameter integer ADDR_SETUP = 4,   // clk_sys cycles driving address
     // insideGadgets GBxCartRead Part 3 measured the real GBA EEPROM bit
     // clock at ~600 ns full period (~300 ns half) on a logic analyser.
-    // Our earlier ~380 ns bit period was too fast for the physical 9853/9854
-    // chip. HALF_CYCLE=50 gives ~620 ns bit period, matching the real bus.
+    // HALF_CYCLE=50 gives ~620 ns bit period, matching the real bus.
     parameter integer EEPROM_HALF_CYCLE = 50, // clk_sys cycles per RD#/WR# half pulse
     parameter integer EEPROM_ADDR_SETUP = 16, // clk_sys cycles A23/D0 stable
                                              // before CS# falls (EEPROM)
     // CS#/CS2# stay low for this many clk_sys cycles after WR#/RD# rise.
-    // 32 cycles = 320 ns @100 MHz. Real Flash needs 30-50 ns write recovery,
-    // and the ROM-chip GPIO block latches on a PHI edge: with a 4.19 MHz PHI
-    // (238 ns period) the CS1# hold must cover at least one PHI cycle or the
-    // GPIO register write is dropped.
+    // 32 cycles = 320 ns @100 MHz. Real Flash needs 30-50 ns write recovery;
+    // the ROM-chip GPIO registers need CS#-low time to process the write and
+    // valid data at/after the CS# rising edge (see S_DONE hold phases).
     parameter integer RELEASE_DELAY = 32,
     parameter integer EEPROM_SESS_TIMEOUT = 1024, // clk_sys cycles without EEPROM
                                                   // access before releasing CS2#/A23
@@ -56,9 +58,11 @@ module gba_cart_controller #(
 
     // ---- PHI terminal control (WAITCNT bit12..11, from gba_top) ----
     // 0 = disabled (pin idle high, GBA default), 1 = 4.19MHz, 2 = 8.38MHz,
-    // 3 = 16.78MHz. The 9853/9854 ROM-chip GPIO (RTC/solar/gyro/rumble carts)
-    // requires a running PHI clock; without it the GPIO registers do not
-    // respond and RTC/gyro/solar peripherals stay dead.
+    // 3 = 16.78MHz. PHI is only consumed by add-on chips that take a clock
+    // (e.g. the Yoshi tilt-sensor ADC). The GPIO registers inside the ROM
+    // chip do NOT need PHI: GBATEK shows Warioware Twisted's gyro/rumble
+    // running with WAITCNT=45B7h (PHI=Off). (The "9853/9854" part numbers
+    // are 4K/64K EEPROM chips, not GPIO/RTC.)
     input  wire [1:0]  phi_sel,
 
     // ---- Pocket cartridge slot (from core_top) ----
@@ -653,22 +657,24 @@ module gba_cart_controller #(
                     rd_n  <= 1'b1;
                     wr_n  <= 1'b1;
                     if (acc_cnt < RELEASE_DELAY - 1) begin
-                        // Release RD#/WR# first while the chip-selects stay
-                        // low: real SRAM samples data on the WR# rising edge,
-                        // Flash needs write-recovery time (WE# high while
-                        // CE# is still low), and the ROM-chip GPIO registers
-                        // latch on the CS# rising edge with data hold time.
+                        // Phase 1 (write recovery): RD#/WR# are already high,
+                        // the chip-selects stay low, and the AD bus stays
+                        // driven. Real SRAM samples data on the WR# rising
+                        // edge, Flash needs WE#-high-while-CE#-low recovery
+                        // time, and the ROM-chip GPIO block needs CS#-low
+                        // time to process the register write.
                         // CS1# keeps its previous value (low for GPIO/EEPROM
                         // write recovery, high for SRAM/Flash so the ROM chip
                         // is never selected); CS2# (pin30) likewise via the
                         // pin30 mux below.
-                        // The AD bus stays driven here: the GPIO/ROM chip
-                        // samples write data on the CS# rising edge, so the
-                        // data must remain valid until CS# actually rises.
                         acc_cnt <= acc_cnt + 1'b1;
-                    end else begin
-                        out_bank2_dir <= 1'b0;
-                        out_bank3_dir <= 1'b0;
+                    end else if (acc_cnt == RELEASE_DELAY - 1) begin
+                        // Phase 2: raise CS# while data is STILL driven.
+                        // Chips that latch on the CS# rising edge (the
+                        // ROM-chip GPIO registers in real carts) must see
+                        // valid data at this edge; releasing the bus in the
+                        // same cycle as CS# would give zero hold time and
+                        // the GPIO register write would be dropped.
                         if (eeprom_sess && eeprom_dma_r) begin
                             // Keep /CS LOW and A23 HIGH across consecutive
                             // EEPROM bit accesses (GBATEK requirement for DMA3).
@@ -684,6 +690,17 @@ module gba_cart_controller #(
                             eeprom_sess   <= 1'b0;
                         end
                         cs2_n         <= 1'b1;   // release CS2# one cycle later
+                        acc_cnt       <= acc_cnt + 1'b1;
+                    end else if (acc_cnt < RELEASE_DELAY * 2 - 1) begin
+                        // Phase 3: CS# is already high, keep the AD bus
+                        // driven for RELEASE_DELAY-1 more cycles so the
+                        // GPIO/ROM chip gets a real data hold time after the
+                        // CS# rising edge.
+                        acc_cnt <= acc_cnt + 1'b1;
+                    end else begin
+                        // Phase 4: release the data bus and complete.
+                        out_bank2_dir <= 1'b0;
+                        out_bank3_dir <= 1'b0;
                         save_done     <= 1'b1;
                         eeprom_done   <= 1'b1;
                         gpio_done     <= 1'b1;
@@ -708,7 +725,8 @@ module gba_cart_controller #(
 
     // bank0 bit layout: [7]=PHI# [6]=WR# [5]=RD# [4]=CS1#
     // PHI follows WAITCNT bit12..11 (disabled/idle-high at reset, GBA
-    // default). The 9853 GPIO/RTC chips require a running PHI.
+    // default). Only add-on chips that take a clock need it (tilt sensor
+    // ADC, camera); GPIO register R/W itself works with PHI disabled.
     // Explicit [7:4] mapping, matching core_top/apf_top - no implicit
     // slicing/alignment involved.
     assign cart_tran_bank0[7]  = phi_enable ? phi : 1'b1;

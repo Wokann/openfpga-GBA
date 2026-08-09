@@ -336,8 +336,8 @@ architecture arch of gba_top is
    --   bit1 = GPIO_cart_mode (live)
    --   bit2 = GPIO request pulse seen since last clear (write 0x4000308 clears)
    --   bit3 = GPIO done pulse seen since last clear (write 0x4000308 clears)
-   signal GPIO_DIAG_DIN     : std_logic_vector(3 downto 0) := (others => '0');
-   signal GPIO_DIAG_REG     : std_logic_vector(3 downto 0) := (others => '0');
+   signal GPIO_DIAG_DIN     : std_logic_vector(7 downto 0) := (others => '0');
+   signal GPIO_DIAG_REG     : std_logic_vector(7 downto 0) := (others => '0');
    signal GPIO_DIAG_WRITTEN : std_logic := '0';
    signal gpio_req_seen     : std_logic := '0';
    signal gpio_done_seen    : std_logic := '0';
@@ -961,10 +961,14 @@ begin
    DIAG_cart_rom_out <= REG_DIAG_CART(0);
    -- HAN: GPIO routing diagnostic. Read returns live mode bits plus latched
    -- request/done pulses; writing any value clears the latches so the diag
-   -- ROM can measure one clean access window.
-   GPIO_DIAG_DIN <= gpio_done_seen & gpio_req_seen & GPIO_cart_mode & specialmodule;
+   -- ROM can measure one clean access window. The high nibble echoes the
+   -- last GPIO read data returned by the cartridge controller, so a diag ROM
+   -- can distinguish "cart drove 0 (write-only / not activated)" from "cart
+   -- did not drive the bus at all (floating lines)".
+   GPIO_DIAG_DIN(3 downto 0) <= gpio_done_seen & gpio_req_seen & GPIO_cart_mode & specialmodule;
+   GPIO_DIAG_DIN(7 downto 4) <= GPIO_Din_muxed;
    iREG_GPIO_DIAG : entity work.eProcReg_gba
-      generic map ((16#308#, 3, 0, 0, 0, readwrite))
+      generic map ((16#308#, 7, 0, 0, 0, readwrite))
       port map (clk100, gb_bus, GPIO_DIAG_DIN, GPIO_DIAG_REG, GPIO_DIAG_WRITTEN);
 
    process (clk100)
