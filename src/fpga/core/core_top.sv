@@ -334,6 +334,8 @@ wire        gba_eeprom_dma_w;
 wire        gba_eeprom_dout_w, gba_eeprom_done_w;
 // HAN: WAITCNT PHI terminal select (bit12..11) from gba_top -> cartridge controller
 wire [1:0]  gba_phi_sel;
+// HAN: diagnostic cart-ROM mode switch (0x4000304 bit0)
+wire        diag_cart_rom;
 
 // GPIO requests from gba_top -> cartridge controller
 assign han_cart_gpio_req  = gba_gpio_read_ena | gba_gpio_write_ena;
@@ -888,7 +890,7 @@ wire [24:0] sdram_rd_addr_from_mux;
 
 rom_source_mux u_rom_mux (
     .clk                 ( clk_sys ),
-    .cart_mode           ( han_rom_cart_mode ),
+    .cart_mode           ( han_rom_cart_mode | diag_cart_rom ),
     .gba_rd_req          ( sdram_read_req_gba ),
     .gba_rd_addr         ( sdram_read_addr_gba ),
     .gba_rd_ready        ( rom_rd_ready ),
@@ -1781,6 +1783,7 @@ gba_top #(
     .EEPROM_ext_dout_in  ( gba_eeprom_dout_w ),
     .EEPROM_ext_done_in  ( gba_eeprom_done_w ),
     .WAITCNT_phi_out     ( gba_phi_sel ),
+    .DIAG_cart_rom_out   ( diag_cart_rom ),
     .save_cart_mode      ( han_save_cart_mode ),
     // SDRAM (ROM reads — muxed with staging in sdram_pocket section)
     .sdram_read_ena      ( sdram_read_req_gba ),

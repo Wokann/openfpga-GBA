@@ -59,6 +59,10 @@ entity gba_top is
       -- HAN: expose WAITCNT PHI terminal select (bit12..11) so the cartridge
       -- controller can drive the physical PHI pin (9853 GPIO/RTC/gyro need it)
       WAITCNT_phi_out       : out    std_logic_vector(1 downto 0) := (others => '0');
+      -- HAN: diagnostic register 0x4000304 bit0 - when set, core_top routes
+      -- ROM reads to the physical cartridge (used to verify the cart bus /
+      -- address decode independently of GPIO)
+      DIAG_cart_rom_out     : out    std_logic := '0';
       -- HAN: 迂回汉化 - save 写访问透传实体卡带（SRAM/Flash 命令不过内部模拟）
       save_cart_mode        : in     std_logic := '0';
       savestate_number      : in     integer;
@@ -325,6 +329,7 @@ architecture arch of gba_top is
    signal REG_IRP_IE  : std_logic_vector(work.pReg_gba_system.IRP_IE .upper downto work.pReg_gba_system.IRP_IE .lower) := (others => '0');
    signal REG_IRP_IF  : std_logic_vector(work.pReg_gba_system.IRP_IF .upper downto work.pReg_gba_system.IRP_IF .lower) := (others => '0');                                                                                                 
    signal REG_WAITCNT : std_logic_vector(work.pReg_gba_system.WAITCNT.upper downto work.pReg_gba_system.WAITCNT.lower) := (others => '0');                                                                                                                                                                                                   
+   signal REG_DIAG_CART : std_logic_vector(0 downto 0) := "0";
    signal REG_IME     : std_logic_vector(work.pReg_gba_system.IME    .upper downto work.pReg_gba_system.IME    .lower) := (others => '0');                                                                                                   
    signal REG_POSTFLG : std_logic_vector(work.pReg_gba_system.POSTFLG.upper downto work.pReg_gba_system.POSTFLG.lower) := (others => '0');
    signal REG_HALTCNT : std_logic_vector(work.pReg_gba_system.HALTCNT.upper downto work.pReg_gba_system.HALTCNT.lower) := (others => '0');
@@ -937,6 +942,12 @@ begin
    iREG_WAITCNT : entity work.eProcReg_gba generic map (work.pReg_gba_system.WAITCNT) port map  (clk100, gb_bus, REG_WAITCNT, REG_WAITCNT, WAITCNT_written);                                                                                                                     
    -- HAN: forward WAITCNT PHI terminal select to the cartridge controller
    WAITCNT_phi_out <= REG_WAITCNT(12 downto 11);
+   -- HAN: diagnostic cart-ROM mode switch (0x4000304 bit0). Read/write so the
+   -- diag ROM can flip ROM reads to the physical cartridge and back.
+   iREG_DIAG_CART : entity work.eProcReg_gba
+      generic map ((16#304#, 0, 0, 1, 0, readwrite))
+      port map (clk100, gb_bus, REG_DIAG_CART, REG_DIAG_CART);
+   DIAG_cart_rom_out <= REG_DIAG_CART(0);
    iREG_ISCGB   : entity work.eProcReg_gba generic map (work.pReg_gba_system.ISCGB  ) port map  (clk100, gb_bus, "0");                                                                                                                     
    iREG_IME     : entity work.eProcReg_gba generic map (work.pReg_gba_system.IME    ) port map  (clk100, gb_bus, REG_IME    , REG_IME    );                                                                                                                       
    iREG_POSTFLG : entity work.eProcReg_gba generic map (work.pReg_gba_system.POSTFLG) port map  (clk100, gb_bus, REG_POSTFLG, REG_POSTFLG);
