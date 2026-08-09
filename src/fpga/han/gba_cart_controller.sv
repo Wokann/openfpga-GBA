@@ -567,8 +567,12 @@ module gba_cart_controller #(
 
                 // ---- GPIO: 16-bit R/W at 0x080000C4..0x080000C8 ----
                 S_GPIO_A: begin
-                    // Halfword address: 0x04000062 + reg (see gpio_abs_addr).
-                    out_bank1     <= 8'h04;      // A[23:16] of halfword address
+                    // Halfword address of 0x080000C4 is 0x04000062; the cart
+                    // bus only carries A[23:0], so the low 24 bits are
+                    // 0x000062 => A[23:16] = 0x00. Driving A18 high here put
+                    // the address outside the ROM-chip GPIO decode window and
+                    // the GPIO registers never responded.
+                    out_bank1     <= 8'h00;      // A[23:16] of halfword address
                     out_bank2     <= gpio_abs_addr[15:8];
                     out_bank3     <= gpio_abs_addr[7:0];
                     out_bank1_dir <= 1'b1;
