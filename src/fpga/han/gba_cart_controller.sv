@@ -38,6 +38,17 @@ module gba_cart_controller #(
     parameter integer ROM_WAIT   = 24,  // clk_sys cycles per 16-bit ROM read
     parameter integer SAVE_WAIT  = 54,  // clk_sys cycles per 8-bit SRAM/Flash access
     parameter integer ADDR_SETUP = 4,   // clk_sys cycles driving address
+    // GPIO write timing (deliberately close to a real GBA host, not the long
+    // SRAM/Flash timing). A real GBA ROM access is ~5 GBA cycles (~300 ns):
+    // CS# low -> 1 cycle -> WR# low pulse -> WR# high -> CS# high. The
+    // ROM-chip GPIO block is a synchronous state machine inside the mask ROM;
+    // an over-long CS#-low / WR#-low window (e.g. >1 us) can exceed its
+    // internal timeout and the register write is silently dropped. These
+    // constants are independent of ADDR_SETUP/SAVE_WAIT on purpose.
+    parameter integer GPIO_ADDR_HOLD = 2,   // CS# low, address still driven
+    parameter integer GPIO_DATA_SETUP = 4,  // data driven, WR# high (~40 ns)
+    parameter integer GPIO_WR_LOW = 16,     // WR# low pulse (~160 ns)
+    parameter integer GPIO_DONE_HOLD = 8,   // data hold after CS# rises
     // insideGadgets GBxCartRead Part 3 measured the real GBA EEPROM bit
     // clock at ~600 ns full period (~300 ns half) on a logic analyser.
     // HALF_CYCLE=50 gives ~620 ns bit period, matching the real bus.
@@ -178,6 +189,9 @@ module gba_cart_controller #(
     localparam S_DONE      = 4'd10;
     localparam S_EEPROM_RESET = 4'd11; // /CS high pulse between EEPROM
                                        // command burst and data burst
+    localparam S_GPIO_DONE = 4'd12;  // GPIO access completion: CS#-low write
+                                     // recovery, CS# rise with data hold,
+                                     // then bus release (host-like timing)
 
     reg [3:0]  state;
     reg [1:0]  word_idx;
@@ -619,37 +633,64 @@ module gba_cart_controller #(
                         gpio_dout <= cart_tran_bank3[3:0];
                         rd_n <= 1'b1;
                         acc_cnt <= 8'd0;
-                        state   <= S_DONE;
+                        state   <= S_GPIO_DONE;
                     end
                 end
 
                 S_GPIO_W: begin
-                    // CS# has already fallen; keep the address driven for the
-                    // latch hold time, then switch AD[7:0] to the write data
-                    // with a setup phase before WR# falls (the ROM-chip GPIO
-                    // block samples data on the WR# falling edge, per the
-                    // jojolebarjos write experiment).
-                    if (acc_cnt < ADDR_SETUP) begin
+                    // Host-like write timing (see GPIO_* parameters): CS# has
+                    // already fallen and latched the address; keep the
+                    // address driven for a short hold, switch AD to the write
+                    // data with a short setup, then pulse WR# low. The total
+                    // CS#-low window stays close to a real GBA access so the
+                    // ROM-chip GPIO state machine sees a valid write cycle.
+                    if (acc_cnt < GPIO_ADDR_HOLD) begin
                         // Address hold phase, WR#/RD# high.
                         wr_n <= 1'b1;
                         rd_n <= 1'b1;
                         acc_cnt <= acc_cnt + 1'b1;
-                    end else if (acc_cnt < ADDR_SETUP * 2) begin
+                    end else if (acc_cnt < GPIO_ADDR_HOLD + GPIO_DATA_SETUP) begin
                         // Drive the write data first and hold WR# high during
                         // a setup phase, so the GPIO registers sample stable
                         // data when WR# falls.
+                        out_bank2     <= 8'h00;  // AD[15:8] = data high byte
                         out_bank3     <= {4'b0, gpio_din_r};
                         out_bank3_dir <= 1'b1;
                         wr_n    <= 1'b1;
                         acc_cnt <= acc_cnt + 1'b1;
-                    end else if (acc_cnt < ADDR_SETUP * 2 + SAVE_WAIT - 1) begin
+                    end else if (acc_cnt < GPIO_ADDR_HOLD + GPIO_DATA_SETUP + GPIO_WR_LOW - 1) begin
                         rd_n <= 1'b1;      // RD# stays high during a write
                         wr_n <= 1'b0;      // WR# low pulse
                         acc_cnt <= acc_cnt + 1'b1;
                     end else begin
                         wr_n    <= 1'b1;
                         acc_cnt <= 8'd0;
-                        state   <= S_DONE;
+                        state   <= S_GPIO_DONE;
+                    end
+                end
+
+                S_GPIO_DONE: begin
+                    rd_n  <= 1'b1;
+                    wr_n  <= 1'b1;
+                    if (acc_cnt < GPIO_DONE_HOLD) begin
+                        // CS# stays low (write recovery) with data driven.
+                        acc_cnt <= acc_cnt + 1'b1;
+                    end else if (acc_cnt == GPIO_DONE_HOLD) begin
+                        // Raise CS# while data is STILL driven: the GPIO
+                        // registers may latch on the CS# rising edge and must
+                        // see valid data there (zero hold time = dropped
+                        // write, the symptom seen on real carts).
+                        cs_n          <= 1'b1;
+                        out_bank1_dir <= 1'b0;
+                        acc_cnt       <= acc_cnt + 1'b1;
+                    end else if (acc_cnt < GPIO_DONE_HOLD * 2) begin
+                        // CS# is high, keep data driven for the hold time.
+                        acc_cnt <= acc_cnt + 1'b1;
+                    end else begin
+                        out_bank2_dir <= 1'b0;
+                        out_bank3_dir <= 1'b0;
+                        gpio_done     <= 1'b1;
+                        state         <= S_IDLE;
                     end
                 end
 
