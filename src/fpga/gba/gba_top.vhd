@@ -6,6 +6,7 @@ library MEM;
 
 use work.pProc_bus_gba.all;
 use work.pReg_savestates.all;
+use work.pRegmap_gba.all;
 
 entity gba_top is
    generic
