@@ -589,18 +589,20 @@ module gba_cart_controller #(
                 S_GPIO_R: begin
                     out_bank2_dir <= 1'b0;
                     out_bank3_dir <= 1'b0;
-                    if (acc_cnt < SAVE_WAIT - 2) begin
+                    if (acc_cnt < SAVE_WAIT - 3) begin
                         rd_n <= 1'b0;
                         acc_cnt <= acc_cnt + 1'b1;
+                    end else if (acc_cnt == SAVE_WAIT - 3) begin
+                        rd_n <= 1'b1;   // RD# rising edge
+                        acc_cnt <= acc_cnt + 1'b1;
                     end else if (acc_cnt == SAVE_WAIT - 2) begin
-                        // Sample while RD# is still LOW: the GPIO/ROM chip
-                        // drives data during the RD# low phase and the CPU
-                        // latches it on the RD# rising edge, so sampling must
-                        // happen before the edge (same as S_ROM_DATA).
+                        // Sample right after the RD# rising edge: like the
+                        // EEPROM data path, the ROM-chip GPIO block drives
+                        // AD[3:0] on/after the edge; sampling earlier reads
+                        // the stale (tri-stated) bus.
                         gpio_dout <= cart_tran_bank3[3:0];
                         acc_cnt <= acc_cnt + 1'b1;
                     end else begin
-                        rd_n    <= 1'b1;   // RD# rising edge
                         acc_cnt   <= 8'd0;
                         state     <= S_DONE;
                     end
@@ -631,8 +633,6 @@ module gba_cart_controller #(
                 S_DONE: begin
                     rd_n  <= 1'b1;
                     wr_n  <= 1'b1;
-                    out_bank2_dir <= 1'b0;
-                    out_bank3_dir <= 1'b0;
                     if (acc_cnt < RELEASE_DELAY - 1) begin
                         // Release RD#/WR# first while the chip-selects stay
                         // low: real SRAM samples data on the WR# rising edge,
@@ -643,8 +643,13 @@ module gba_cart_controller #(
                         // write recovery, high for SRAM/Flash so the ROM chip
                         // is never selected); CS2# (pin30) likewise via the
                         // pin30 mux below.
+                        // The AD bus stays driven here: the GPIO/ROM chip
+                        // samples write data on the CS# rising edge, so the
+                        // data must remain valid until CS# actually rises.
                         acc_cnt <= acc_cnt + 1'b1;
                     end else begin
+                        out_bank2_dir <= 1'b0;
+                        out_bank3_dir <= 1'b0;
                         if (eeprom_sess && eeprom_dma_r) begin
                             // Keep /CS LOW and A23 HIGH across consecutive
                             // EEPROM bit accesses (GBATEK requirement for DMA3).
