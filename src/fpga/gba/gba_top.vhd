@@ -331,6 +331,16 @@ architecture arch of gba_top is
    signal REG_IRP_IF  : std_logic_vector(work.pReg_gba_system.IRP_IF .upper downto work.pReg_gba_system.IRP_IF .lower) := (others => '0');                                                                                                 
    signal REG_WAITCNT : std_logic_vector(work.pReg_gba_system.WAITCNT.upper downto work.pReg_gba_system.WAITCNT.lower) := (others => '0');                                                                                                                                                                                                   
    signal REG_DIAG_CART : std_logic_vector(0 downto 0) := "0";
+   -- HAN: GPIO routing diagnostic (0x4000306)
+   --   bit0 = specialmodule (live)
+   --   bit1 = GPIO_cart_mode (live)
+   --   bit2 = GPIO request pulse seen since last clear (write 0x4000306 clears)
+   --   bit3 = GPIO done pulse seen since last clear (write 0x4000306 clears)
+   signal GPIO_DIAG_DIN     : std_logic_vector(3 downto 0) := (others => '0');
+   signal GPIO_DIAG_REG     : std_logic_vector(3 downto 0) := (others => '0');
+   signal GPIO_DIAG_WRITTEN : std_logic := '0';
+   signal gpio_req_seen     : std_logic := '0';
+   signal gpio_done_seen    : std_logic := '0';
    signal REG_IME     : std_logic_vector(work.pReg_gba_system.IME    .upper downto work.pReg_gba_system.IME    .lower) := (others => '0');                                                                                                   
    signal REG_POSTFLG : std_logic_vector(work.pReg_gba_system.POSTFLG.upper downto work.pReg_gba_system.POSTFLG.lower) := (others => '0');
    signal REG_HALTCNT : std_logic_vector(work.pReg_gba_system.HALTCNT.upper downto work.pReg_gba_system.HALTCNT.lower) := (others => '0');
@@ -949,6 +959,34 @@ begin
       generic map ((16#304#, 0, 0, 1, 0, readwrite))
       port map (clk100, gb_bus, REG_DIAG_CART, REG_DIAG_CART);
    DIAG_cart_rom_out <= REG_DIAG_CART(0);
+   -- HAN: GPIO routing diagnostic. Read returns live mode bits plus latched
+   -- request/done pulses; writing any value clears the latches so the diag
+   -- ROM can measure one clean access window.
+   GPIO_DIAG_DIN <= gpio_done_seen & gpio_req_seen & GPIO_cart_mode & specialmodule;
+   iREG_GPIO_DIAG : entity work.eProcReg_gba
+      generic map ((16#306#, 3, 0, 0, 0, readwrite))
+      port map (clk100, gb_bus, GPIO_DIAG_DIN, GPIO_DIAG_REG, GPIO_DIAG_WRITTEN);
+
+   process (clk100)
+   begin
+      if rising_edge(clk100) then
+         if reset = '1' then
+            gpio_req_seen  <= '0';
+            gpio_done_seen <= '0';
+         else
+            if GPIO_DIAG_WRITTEN = '1' then
+               gpio_req_seen  <= '0';
+               gpio_done_seen <= '0';
+            end if;
+            if (GPIO_readEna = '1' or GPIO_writeEna = '1') then
+               gpio_req_seen <= '1';
+            end if;
+            if GPIO_done_muxed = '1' then
+               gpio_done_seen <= '1';
+            end if;
+         end if;
+      end if;
+   end process;
    iREG_ISCGB   : entity work.eProcReg_gba generic map (work.pReg_gba_system.ISCGB  ) port map  (clk100, gb_bus, "0");                                                                                                                     
    iREG_IME     : entity work.eProcReg_gba generic map (work.pReg_gba_system.IME    ) port map  (clk100, gb_bus, REG_IME    , REG_IME    );                                                                                                                       
    iREG_POSTFLG : entity work.eProcReg_gba generic map (work.pReg_gba_system.POSTFLG) port map  (clk100, gb_bus, REG_POSTFLG, REG_POSTFLG);
