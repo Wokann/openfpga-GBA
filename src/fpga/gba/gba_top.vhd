@@ -50,6 +50,7 @@ entity gba_top is
       GPIO_Din_in           : in     std_logic_vector(3 downto 0) := (others => '0'); -- read data
       GPIO_done_in          : in     std_logic := '0';             -- read/write done pulse
       GPIO_diag_in          : in     std_logic_vector(7 downto 0) := (others => '0'); -- cart controller diag byte
+      GPIO_timing_mode_out  : out    std_logic_vector(1 downto 0) := "00"; -- GPIO write timing mode (0x400030A)
       -- HAN: EEPROM bit-serial forwarding to physical cartridge
       EEPROM_cart_mode      : in     std_logic := '0';             -- 1 = EEPROM handled by cart
       EEPROM_ext_req_out    : out    std_logic := '0';             -- bit access request pulse
@@ -344,6 +345,7 @@ architecture arch of gba_top is
    signal GPIO_DIAG_WRITTEN : std_logic := '0';
    signal gpio_req_seen     : std_logic := '0';
    signal gpio_done_seen    : std_logic := '0';
+   signal REG_GPIO_TMODE    : std_logic_vector(1 downto 0) := "00";
    signal REG_IME     : std_logic_vector(work.pReg_gba_system.IME    .upper downto work.pReg_gba_system.IME    .lower) := (others => '0');                                                                                                   
    signal REG_POSTFLG : std_logic_vector(work.pReg_gba_system.POSTFLG.upper downto work.pReg_gba_system.POSTFLG.lower) := (others => '0');
    signal REG_HALTCNT : std_logic_vector(work.pReg_gba_system.HALTCNT.upper downto work.pReg_gba_system.HALTCNT.lower) := (others => '0');
@@ -974,6 +976,13 @@ begin
    iREG_GPIO_DIAG : entity work.eProcReg_gba
       generic map ((16#308#, 15, 0, 0, 0, readwrite))
       port map (clk100, gb_bus, GPIO_DIAG_DIN, GPIO_DIAG_REG, GPIO_DIAG_WRITTEN);
+   -- HAN: GPIO write-timing sweep register (0x400030A, 2 bits). Lets the diag
+   -- ROM switch the cartridge controller's GPIO write timing between modes
+   -- without rebuilding the bitstream.
+   iREG_GPIO_TMODE : entity work.eProcReg_gba
+      generic map ((16#30A#, 1, 0, 0, 0, readwrite))
+      port map (clk100, gb_bus, (REG_GPIO_TMODE'range => '0'), REG_GPIO_TMODE);
+   GPIO_timing_mode_out <= REG_GPIO_TMODE;
 
    process (clk100)
    begin

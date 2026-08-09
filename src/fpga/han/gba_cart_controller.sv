@@ -125,6 +125,13 @@ module gba_cart_controller #(
     input  wire [3:0]  gpio_din,           // write data (D3..D0)
     output reg  [3:0]  gpio_dout,          // read data (D3..D0)
     output reg         gpio_done,
+    // GPIO write-timing mode select (0..3), written by the diag ROM via
+    // 0x400030A so one bitstream can sweep several write timings:
+    //   0: addr-hold 8, data-setup 4, WR#-low 16 (default)
+    //   1: addr-hold 2, data-setup 2, WR#-low 16
+    //   2: addr-hold 16, data-setup 16, WR#-low 54 (long, SRAM-style)
+    //   3: addr-hold 8, data switches with WR# falling (no setup)
+    input  wire [1:0]  gpio_timing_mode,
 
     // ---- status / debug ----
     // GPIO diagnostic byte (read by the diag ROM via 0x4000308 bit15-8):
@@ -214,6 +221,8 @@ module gba_cart_controller #(
     reg        save_is_write;
     reg [15:0] gpio_abs_addr;      // 0x00C4 + {gpio_addr,1'b0}
     reg [3:0]  gpio_din_r;
+    // Selected GPIO write timing (combinational from gpio_timing_mode)
+    reg [7:0]  gpio_wr_addr_hold, gpio_wr_data_setup, gpio_wr_low;
     // EEPROM session: GBATEK requires /CS=LOW and A23=HIGH throughout the
     // whole DMA3 transfer, not just per-bit. We keep the chip selected for a
     // short timeout after the last bit; the next bit (DMA continues) reuses
@@ -238,6 +247,17 @@ module gba_cart_controller #(
     reg        rd_n, cs_n, cs2_n, wr_n;
 
     wire [23:0] word_addr = (byte_addr >> 1) + word_idx;
+
+    // GPIO write timing sweep (see gpio_timing_mode). Combinational so the
+    // diag ROM can switch modes between accesses without reconfiguring.
+    always @(*) begin
+        case (gpio_timing_mode)
+            2'd1: begin gpio_wr_addr_hold = 8'd2;  gpio_wr_data_setup = 8'd2;  gpio_wr_low = 8'd16; end
+            2'd2: begin gpio_wr_addr_hold = 8'd16; gpio_wr_data_setup = 8'd16; gpio_wr_low = 8'd54; end
+            2'd3: begin gpio_wr_addr_hold = 8'd8;  gpio_wr_data_setup = 8'd0;  gpio_wr_low = 8'd16; end
+            default: begin gpio_wr_addr_hold = 8'd8; gpio_wr_data_setup = 8'd4; gpio_wr_low = 8'd16; end
+        endcase
+    end
 
     always @(posedge clk or negedge reset_n) begin
         if (!reset_n) begin
@@ -667,12 +687,12 @@ module gba_cart_controller #(
                     // data with a short setup, then pulse WR# low. The total
                     // CS#-low window stays close to a real GBA access so the
                     // ROM-chip GPIO state machine sees a valid write cycle.
-                    if (acc_cnt < GPIO_ADDR_HOLD) begin
+                    if (acc_cnt < gpio_wr_addr_hold) begin
                         // Address hold phase, WR#/RD# high.
                         wr_n <= 1'b1;
                         rd_n <= 1'b1;
                         acc_cnt <= acc_cnt + 1'b1;
-                    end else if (acc_cnt < GPIO_ADDR_HOLD + GPIO_DATA_SETUP) begin
+                    end else if (acc_cnt < gpio_wr_addr_hold + gpio_wr_data_setup) begin
                         // Drive the write data first and hold WR# high during
                         // a setup phase, so the GPIO registers sample stable
                         // data when WR# falls.
@@ -682,8 +702,16 @@ module gba_cart_controller #(
                         gpio_diag[6]  <= 1'b1;   // write data driven
                         wr_n    <= 1'b1;
                         acc_cnt <= acc_cnt + 1'b1;
-                    end else if (acc_cnt < GPIO_ADDR_HOLD + GPIO_DATA_SETUP + GPIO_WR_LOW - 1) begin
+                    end else if (acc_cnt < gpio_wr_addr_hold + gpio_wr_data_setup + gpio_wr_low - 1) begin
                         rd_n <= 1'b1;      // RD# stays high during a write
+                        if (gpio_wr_data_setup == 8'd0) begin
+                            // Mode 3: drive the data on the same cycle WR#
+                            // falls, so the GPIO registers sample the bus at
+                            // the WR# edge with zero data setup.
+                            out_bank2     <= 8'h00;
+                            out_bank3     <= {4'b0, gpio_din_r};
+                            gpio_diag[6]  <= 1'b1;
+                        end
                         wr_n <= 1'b0;      // WR# low pulse
                         gpio_diag[2] <= 1'b1;   // WR# low issued
                         acc_cnt <= acc_cnt + 1'b1;
@@ -795,7 +823,11 @@ module gba_cart_controller #(
     // ADC, camera); GPIO register R/W itself works with PHI disabled.
     // Explicit [7:4] mapping, matching core_top/apf_top - no implicit
     // slicing/alignment involved.
-    assign cart_tran_bank0[7]  = phi_enable ? phi : 1'b1;
+    // PHI output: driven only while WAITCNT enables it (real GBA tri-states
+    // the PHI terminal when disabled). Driving the pin high while "disabled"
+    // fights whatever the Pocket slot circuitry / cartridge does with it and
+    // can keep the ROM-chip GPIO block from seeing a valid PHI state.
+    assign cart_tran_bank0[7]  = phi_enable ? phi : 1'bz;
     assign cart_tran_bank0[6]  = wr_n;
     assign cart_tran_bank0[5]  = rd_n;
     assign cart_tran_bank0[4]  = cs_n;
