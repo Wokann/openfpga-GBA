@@ -591,41 +591,56 @@ module gba_cart_controller #(
                 end
 
                 S_GPIO_R: begin
-                    out_bank2_dir <= 1'b0;
-                    out_bank3_dir <= 1'b0;
-                    if (acc_cnt < SAVE_WAIT - 3) begin
+                    // CS# has already fallen (S_GPIO_A latched the address).
+                    // Hold the address on AD[15:0] for the latch hold time
+                    // before releasing it to data, exactly like S_ROM_DATA.
+                    if (acc_cnt < ADDR_SETUP) begin
+                        rd_n <= 1'b1;
+                        acc_cnt <= acc_cnt + 1'b1;
+                    end else if (acc_cnt == ADDR_SETUP) begin
+                        // Release AD bus (GPIO data comes from cart on AD[3:0])
+                        // and start the read strobe.
+                        out_bank2_dir <= 1'b0;
+                        out_bank3_dir <= 1'b0;
                         rd_n <= 1'b0;
                         acc_cnt <= acc_cnt + 1'b1;
-                    end else if (acc_cnt == SAVE_WAIT - 3) begin
-                        rd_n <= 1'b1;   // RD# rising edge
-                        acc_cnt <= acc_cnt + 1'b1;
-                    end else if (acc_cnt == SAVE_WAIT - 2) begin
-                        // Sample right after the RD# rising edge: like the
-                        // EEPROM data path, the ROM-chip GPIO block drives
-                        // AD[3:0] on/after the edge; sampling earlier reads
-                        // the stale (tri-stated) bus.
-                        gpio_dout <= cart_tran_bank3[3:0];
+                    end else if (acc_cnt < ADDR_SETUP + SAVE_WAIT - 1) begin
+                        rd_n <= 1'b0;
                         acc_cnt <= acc_cnt + 1'b1;
                     end else begin
-                        acc_cnt   <= 8'd0;
-                        state     <= S_DONE;
+                        // Sample while RD# is still low: like the ROM path,
+                        // the ROM-chip GPIO block drives AD[3:0] during the
+                        // RD# low phase and tri-states after RD# rises.
+                        // Sampling after the rising edge reads a stale bus.
+                        gpio_dout <= cart_tran_bank3[3:0];
+                        rd_n <= 1'b1;
+                        acc_cnt <= 8'd0;
+                        state   <= S_DONE;
                     end
                 end
 
                 S_GPIO_W: begin
-                    // Drive the write data first and hold WR# high during a
-                    // setup phase, so the ROM-chip GPIO registers sample
-                    // stable data when WR# falls (real GBA drives data before
-                    // asserting WR#; writing data and WR# on the same cycle
-                    // gives zero setup time and can store the old address
-                    // byte instead of the GPIO data).
-                    out_bank3     <= {4'b0, gpio_din_r};
-                    out_bank3_dir <= 1'b1;
+                    // CS# has already fallen; keep the address driven for the
+                    // latch hold time, then switch AD[7:0] to the write data
+                    // with a setup phase before WR# falls (the ROM-chip GPIO
+                    // block samples data on the WR# falling edge, per the
+                    // jojolebarjos write experiment).
                     if (acc_cnt < ADDR_SETUP) begin
-                        wr_n    <= 1'b1;   // data setup, WR# high
+                        // Address hold phase, WR#/RD# high.
+                        wr_n <= 1'b1;
+                        rd_n <= 1'b1;
                         acc_cnt <= acc_cnt + 1'b1;
-                    end else if (acc_cnt < ADDR_SETUP + SAVE_WAIT - 1) begin
-                        wr_n    <= 1'b0;   // WR# low pulse
+                    end else if (acc_cnt < ADDR_SETUP * 2) begin
+                        // Drive the write data first and hold WR# high during
+                        // a setup phase, so the GPIO registers sample stable
+                        // data when WR# falls.
+                        out_bank3     <= {4'b0, gpio_din_r};
+                        out_bank3_dir <= 1'b1;
+                        wr_n    <= 1'b1;
+                        acc_cnt <= acc_cnt + 1'b1;
+                    end else if (acc_cnt < ADDR_SETUP * 2 + SAVE_WAIT - 1) begin
+                        rd_n <= 1'b1;      // RD# stays high during a write
+                        wr_n <= 1'b0;      // WR# low pulse
                         acc_cnt <= acc_cnt + 1'b1;
                     end else begin
                         wr_n    <= 1'b1;
