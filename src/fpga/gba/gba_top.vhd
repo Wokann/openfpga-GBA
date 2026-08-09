@@ -331,11 +331,11 @@ architecture arch of gba_top is
    signal REG_IRP_IF  : std_logic_vector(work.pReg_gba_system.IRP_IF .upper downto work.pReg_gba_system.IRP_IF .lower) := (others => '0');                                                                                                 
    signal REG_WAITCNT : std_logic_vector(work.pReg_gba_system.WAITCNT.upper downto work.pReg_gba_system.WAITCNT.lower) := (others => '0');                                                                                                                                                                                                   
    signal REG_DIAG_CART : std_logic_vector(0 downto 0) := "0";
-   -- HAN: GPIO routing diagnostic (0x4000306)
+   -- HAN: GPIO routing diagnostic (0x4000308)
    --   bit0 = specialmodule (live)
    --   bit1 = GPIO_cart_mode (live)
-   --   bit2 = GPIO request pulse seen since last clear (write 0x4000306 clears)
-   --   bit3 = GPIO done pulse seen since last clear (write 0x4000306 clears)
+   --   bit2 = GPIO request pulse seen since last clear (write 0x4000308 clears)
+   --   bit3 = GPIO done pulse seen since last clear (write 0x4000308 clears)
    signal GPIO_DIAG_DIN     : std_logic_vector(3 downto 0) := (others => '0');
    signal GPIO_DIAG_REG     : std_logic_vector(3 downto 0) := (others => '0');
    signal GPIO_DIAG_WRITTEN : std_logic := '0';
@@ -964,7 +964,7 @@ begin
    -- ROM can measure one clean access window.
    GPIO_DIAG_DIN <= gpio_done_seen & gpio_req_seen & GPIO_cart_mode & specialmodule;
    iREG_GPIO_DIAG : entity work.eProcReg_gba
-      generic map ((16#306#, 3, 0, 0, 0, readwrite))
+      generic map ((16#308#, 3, 0, 0, 0, readwrite))
       port map (clk100, gb_bus, GPIO_DIAG_DIN, GPIO_DIAG_REG, GPIO_DIAG_WRITTEN);
 
    process (clk100)
