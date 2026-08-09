@@ -45,7 +45,9 @@ module gba_cart_controller #(
     // an over-long CS#-low / WR#-low window (e.g. >1 us) can exceed its
     // internal timeout and the register write is silently dropped. These
     // constants are independent of ADDR_SETUP/SAVE_WAIT on purpose.
-    parameter integer GPIO_ADDR_HOLD = 2,   // CS# low, address still driven
+    parameter integer GPIO_ADDR_HOLD = 8,   // CS# low, address still driven
+                                             // (~80 ns; real carts need
+                                             // >1 GBA cycle address hold)
     parameter integer GPIO_DATA_SETUP = 4,  // data driven, WR# high (~40 ns)
     parameter integer GPIO_WR_LOW = 16,     // WR# low pulse (~160 ns)
     parameter integer GPIO_DONE_HOLD = 8,   // data hold after CS# rises
@@ -283,8 +285,11 @@ module gba_cart_controller #(
             eeprom_done <= 1'b0;
             gpio_done <= 1'b0;
             // Live PHI status for the diag ROM (0x4000308 bit15-8):
-            // bit4 = enabled by WAITCNT, bit5 = current pin level.
-            gpio_diag[5] <= phi;
+            // bit4 = enabled by WAITCNT, bit5 = PHYSICAL pin level read back
+            // from the slot. If an external driver (Pocket slot circuitry)
+            // fights our output, the read-back will show it instead of the
+            // internally generated phi.
+            gpio_diag[5] <= cart_tran_bank0[7];
             gpio_diag[4] <= phi_enable;
 
             case (state)
