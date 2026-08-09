@@ -125,6 +125,16 @@ module gba_cart_controller #(
     output reg         gpio_done,
 
     // ---- status / debug ----
+    // GPIO diagnostic byte (read by the diag ROM via 0x4000308 bit15-8):
+    //   bit0: GPIO request entered S_GPIO_A
+    //   bit1: CS1# went low for this GPIO access
+    //   bit2: WR# low pulse issued (GPIO write)
+    //   bit3: GPIO read sampled (RD# low phase)
+    //   bit4: PHI enabled (WAITCNT bit11-12 != 0)
+    //   bit5: PHI pin current level (live)
+    //   bit6: GPIO write data driven on AD[7:0]
+    //   bit7: (reserved)
+    output reg  [7:0]  gpio_diag,
     output reg         cart_present,
     output reg  [7:0]  err_count
 );
@@ -246,6 +256,7 @@ module gba_cart_controller #(
             gpio_din_r      <= 4'd0;
             gpio_dout       <= 4'd0;
             gpio_done       <= 1'b0;
+            gpio_diag       <= 8'd0;
             eeprom_sess     <= 1'b0;
             eeprom_sess_cnt <= 10'd0;
             eeprom_rnw_prev <= 1'b1;
@@ -271,6 +282,10 @@ module gba_cart_controller #(
             save_done <= 1'b0;
             eeprom_done <= 1'b0;
             gpio_done <= 1'b0;
+            // Live PHI status for the diag ROM (0x4000308 bit15-8):
+            // bit4 = enabled by WAITCNT, bit5 = current pin level.
+            gpio_diag[5] <= phi;
+            gpio_diag[4] <= phi_enable;
 
             case (state)
                 S_IDLE: begin
@@ -596,11 +611,13 @@ module gba_cart_controller #(
                     out_bank1_dir <= 1'b1;
                     out_bank2_dir <= 1'b1;
                     out_bank3_dir <= 1'b1;
+                    gpio_diag[0]  <= 1'b1;   // request entered S_GPIO_A
                     cs_n          <= 1'b1;      // address setup, CS# high
                     rd_n          <= 1'b1;
                     wr_n          <= 1'b1;
                     if (acc_cnt == ADDR_SETUP - 1) begin
                         cs_n <= 1'b0;           // CS# falling edge latches addr
+                        gpio_diag[1] <= 1'b1;   // CS1# went low
                         state <= gpio_rnw ? S_GPIO_R : S_GPIO_W;
                         acc_cnt <= 8'd0;
                     end else begin
@@ -631,6 +648,7 @@ module gba_cart_controller #(
                         // RD# low phase and tri-states after RD# rises.
                         // Sampling after the rising edge reads a stale bus.
                         gpio_dout <= cart_tran_bank3[3:0];
+                        gpio_diag[3] <= 1'b1;   // read sampled
                         rd_n <= 1'b1;
                         acc_cnt <= 8'd0;
                         state   <= S_GPIO_DONE;
@@ -656,11 +674,13 @@ module gba_cart_controller #(
                         out_bank2     <= 8'h00;  // AD[15:8] = data high byte
                         out_bank3     <= {4'b0, gpio_din_r};
                         out_bank3_dir <= 1'b1;
+                        gpio_diag[6]  <= 1'b1;   // write data driven
                         wr_n    <= 1'b1;
                         acc_cnt <= acc_cnt + 1'b1;
                     end else if (acc_cnt < GPIO_ADDR_HOLD + GPIO_DATA_SETUP + GPIO_WR_LOW - 1) begin
                         rd_n <= 1'b1;      // RD# stays high during a write
                         wr_n <= 1'b0;      // WR# low pulse
+                        gpio_diag[2] <= 1'b1;   // WR# low issued
                         acc_cnt <= acc_cnt + 1'b1;
                     end else begin
                         wr_n    <= 1'b1;

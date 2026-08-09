@@ -49,6 +49,7 @@ entity gba_top is
       GPIO_Dout_out         : out    std_logic_vector(3 downto 0); -- write data D3..D0
       GPIO_Din_in           : in     std_logic_vector(3 downto 0) := (others => '0'); -- read data
       GPIO_done_in          : in     std_logic := '0';             -- read/write done pulse
+      GPIO_diag_in          : in     std_logic_vector(7 downto 0) := (others => '0'); -- cart controller diag byte
       -- HAN: EEPROM bit-serial forwarding to physical cartridge
       EEPROM_cart_mode      : in     std_logic := '0';             -- 1 = EEPROM handled by cart
       EEPROM_ext_req_out    : out    std_logic := '0';             -- bit access request pulse
@@ -336,8 +337,10 @@ architecture arch of gba_top is
    --   bit1 = GPIO_cart_mode (live)
    --   bit2 = GPIO request pulse seen since last clear (write 0x4000308 clears)
    --   bit3 = GPIO done pulse seen since last clear (write 0x4000308 clears)
-   signal GPIO_DIAG_DIN     : std_logic_vector(7 downto 0) := (others => '0');
-   signal GPIO_DIAG_REG     : std_logic_vector(7 downto 0) := (others => '0');
+   --   bit7-4 = last GPIO read data from the cartridge controller
+   --  bit15-8 = cart controller GPIO diag byte (addr/cs/wr/phi status)
+   signal GPIO_DIAG_DIN     : std_logic_vector(15 downto 0) := (others => '0');
+   signal GPIO_DIAG_REG     : std_logic_vector(15 downto 0) := (others => '0');
    signal GPIO_DIAG_WRITTEN : std_logic := '0';
    signal gpio_req_seen     : std_logic := '0';
    signal gpio_done_seen    : std_logic := '0';
@@ -967,8 +970,9 @@ begin
    -- did not drive the bus at all (floating lines)".
    GPIO_DIAG_DIN(3 downto 0) <= gpio_done_seen & gpio_req_seen & GPIO_cart_mode & specialmodule;
    GPIO_DIAG_DIN(7 downto 4) <= GPIO_Din_muxed;
+   GPIO_DIAG_DIN(15 downto 8) <= GPIO_diag_in;
    iREG_GPIO_DIAG : entity work.eProcReg_gba
-      generic map ((16#308#, 7, 0, 0, 0, readwrite))
+      generic map ((16#308#, 15, 0, 0, 0, readwrite))
       port map (clk100, gb_bus, GPIO_DIAG_DIN, GPIO_DIAG_REG, GPIO_DIAG_WRITTEN);
 
    process (clk100)
