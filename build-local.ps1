@@ -13,7 +13,8 @@ $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $root
 
 Write-Host "[1/3] Quartus compile (docker raetro/quartus:21.1) ..." -ForegroundColor Cyan
-docker run --rm -v "${PWD}:/build" -w /build raetro/quartus:21.1 quartus_sh -t generate.tcl
+$devOpts = if ($env:HAN_DEV_BUILD) { @("-e", "HAN_DEV_BUILD=$env:HAN_DEV_BUILD") } else { @() }
+docker run --rm @devOpts -v "${PWD}:/build" -w /build raetro/quartus:21.1 quartus_sh -t generate.tcl
 if ($LASTEXITCODE -ne 0) { throw "Quartus compile failed (exit $LASTEXITCODE)" }
 
 Write-Host "[2/3] Reverse bitstream ..." -ForegroundColor Cyan

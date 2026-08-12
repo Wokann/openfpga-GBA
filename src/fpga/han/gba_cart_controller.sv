@@ -51,6 +51,15 @@ module gba_cart_controller #(
     parameter integer GPIO_DATA_SETUP = 4,  // data driven, WR# high (~40 ns)
     parameter integer GPIO_WR_LOW = 16,     // WR# low pulse (~160 ns)
     parameter integer GPIO_DONE_HOLD = 8,   // data hold after CS# rises
+    // Inter-access recovery time in clk_sys cycles (GPIO only).
+    // Measured on a real cart: the ROM-chip GPIO registers latch a write a
+    // beat late -- a read immediately after a write returns the PREVIOUS
+    // value (W5->R0, W7->R5, WF->R7), and RTC bit-banging fails. Inserting
+    // a ~14ms delay between accesses makes the read-back correct and the
+    // S3511 returns a valid status byte (0x40). The S3511 tSCK spec wants
+    // >= 0.5-5us pulses; 800 cycles @100MHz = 8us per access gives a
+    // ~32us SCK period (~31kHz), inside the S3511 rating.
+    parameter integer GPIO_RECOVER = 800,
     // insideGadgets GBxCartRead Part 3 measured the real GBA EEPROM bit
     // clock at ~600 ns full period (~300 ns half) on a logic analyser.
     // HALF_CYCLE=50 gives ~620 ns bit period, matching the real bus.
@@ -125,13 +134,16 @@ module gba_cart_controller #(
     input  wire [3:0]  gpio_din,           // write data (D3..D0)
     output reg  [3:0]  gpio_dout,          // read data (D3..D0)
     output reg         gpio_done,
-    // GPIO write-timing mode select (0..3), written by the diag ROM via
+    // GPIO write-timing mode select (0..5), written by the diag ROM via
     // 0x400030A so one bitstream can sweep several write timings:
     //   0: addr-hold 8, data-setup 4, WR#-low 16 (default)
     //   1: addr-hold 2, data-setup 2, WR#-low 16
     //   2: addr-hold 16, data-setup 16, WR#-low 54 (long, SRAM-style)
     //   3: addr-hold 8, data switches with WR# falling (no setup)
-    input  wire [1:0]  gpio_timing_mode,
+    //   4: addr-hold 200, data-setup 100, WR#-low 255 (~6us per access,
+    //      slow enough to exceed the S3511 tSCK minimum pulse)
+    //   5: addr-hold 255, data-setup 200, WR#-low 255 (~12us, diagnostic)
+    input  wire [2:0]  gpio_timing_mode,
 
     // ---- status / debug ----
     // GPIO diagnostic byte (read by the diag ROM via 0x4000308 bit15-8):
@@ -211,6 +223,8 @@ module gba_cart_controller #(
     localparam S_GPIO_DONE = 4'd12;  // GPIO access completion: CS#-low write
                                      // recovery, CS# rise with data hold,
                                      // then bus release (host-like timing)
+    localparam S_GPIO_RECOVER = 4'd13; // GPIO-only settle time between
+                                       // accesses (see GPIO_RECOVER)
 
     reg [3:0]  state;
     reg [1:0]  word_idx;
@@ -253,9 +267,11 @@ module gba_cart_controller #(
     // diag ROM can switch modes between accesses without reconfiguring.
     always @(*) begin
         case (gpio_timing_mode)
-            2'd1: begin gpio_wr_addr_hold = 8'd2;  gpio_wr_data_setup = 8'd2;  gpio_wr_low = 8'd16; end
-            2'd2: begin gpio_wr_addr_hold = 8'd16; gpio_wr_data_setup = 8'd16; gpio_wr_low = 8'd54; end
-            2'd3: begin gpio_wr_addr_hold = 8'd8;  gpio_wr_data_setup = 8'd0;  gpio_wr_low = 8'd16; end
+            3'd1: begin gpio_wr_addr_hold = 8'd2;   gpio_wr_data_setup = 8'd2;   gpio_wr_low = 8'd16;  end
+            3'd2: begin gpio_wr_addr_hold = 8'd16;  gpio_wr_data_setup = 8'd16;  gpio_wr_low = 8'd54;  end
+            3'd3: begin gpio_wr_addr_hold = 8'd8;   gpio_wr_data_setup = 8'd0;   gpio_wr_low = 8'd16;  end
+            3'd4: begin gpio_wr_addr_hold = 8'd200; gpio_wr_data_setup = 8'd100; gpio_wr_low = 8'd255; end
+            3'd5: begin gpio_wr_addr_hold = 8'd255; gpio_wr_data_setup = 8'd200; gpio_wr_low = 8'd255; end
             default: begin gpio_wr_addr_hold = 8'd8; gpio_wr_data_setup = 8'd4; gpio_wr_low = 8'd16; end
         endcase
     end
@@ -747,7 +763,28 @@ module gba_cart_controller #(
                         out_bank2_dir <= 1'b0;
                         out_bank3_dir <= 1'b0;
                         gpio_done     <= 1'b1;
-                        state         <= S_IDLE;
+                        state         <= S_GPIO_RECOVER;
+                        acc_cnt       <= 8'd0;
+                    end
+                end
+
+                S_GPIO_RECOVER: begin
+                    // Keep the cart bus fully idle (CS#/RD#/WR# high, AD
+                    // released) for GPIO_RECOVER cycles after every GPIO
+                    // access. The ROM-chip GPIO registers need this settle
+                    // time before the next GPIO access: without it, reads
+                    // return the previous write value and RTC bit-banging
+                    // never sees a coherent command. Other accesses (SD ROM
+                    // fetch, SDRAM) do not pass through this controller, so
+                    // CPU instruction fetch is not stalled by this wait.
+                    rd_n  <= 1'b1;
+                    wr_n  <= 1'b1;
+                    cs_n  <= 1'b1;
+                    if (acc_cnt < GPIO_RECOVER - 1) begin
+                        acc_cnt <= acc_cnt + 1'b1;
+                    end else begin
+                        acc_cnt <= 8'd0;
+                        state   <= S_IDLE;
                     end
                 end
 

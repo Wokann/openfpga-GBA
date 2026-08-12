@@ -266,7 +266,7 @@ wire [3:0]  han_cart_gpio_din;
 wire [3:0]  han_cart_gpio_dout;
 wire        han_cart_gpio_done;
 wire [7:0]  han_cart_gpio_diag;
-wire [1:0]  han_cart_gpio_tmode;
+wire [2:0]  han_cart_gpio_tmode;
 // HAN EEPROM bit-serial request bus (gba_top <-> cartridge controller)
 wire        han_cart_eeprom_req;
 wire        han_cart_eeprom_rnw;
