@@ -142,7 +142,7 @@ module gba_cart_controller #(
     //   bit4: PHI enabled (WAITCNT bit11-12 != 0)
     //   bit5: PHI pin current level (live)
     //   bit6: GPIO write data driven on AD[7:0]
-    //   bit7: (reserved)
+    //   bit7: GPIO READ request entered controller (S_GPIO_A with rnw=1)
     output reg  [7:0]  gpio_diag,
     output reg         cart_present,
     output reg  [7:0]  err_count
@@ -637,6 +637,7 @@ module gba_cart_controller #(
                     out_bank2_dir <= 1'b1;
                     out_bank3_dir <= 1'b1;
                     gpio_diag[0]  <= 1'b1;   // request entered S_GPIO_A
+                    if (gpio_rnw) gpio_diag[7] <= 1'b1;  // read request reached the controller
                     cs_n          <= 1'b1;      // address setup, CS# high
                     rd_n          <= 1'b1;
                     wr_n          <= 1'b1;

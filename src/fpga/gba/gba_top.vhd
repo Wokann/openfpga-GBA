@@ -336,15 +336,15 @@ architecture arch of gba_top is
    -- HAN: GPIO routing diagnostic (0x4000308)
    --   bit0 = specialmodule (live)
    --   bit1 = GPIO_cart_mode (live)
-   --   bit2 = GPIO request pulse seen since last clear (write 0x4000308 clears)
-   --   bit3 = GPIO done pulse seen since last clear (write 0x4000308 clears)
+   --   bit2 = GPIO WRITE request pulse seen since last clear (write 0x4000308 clears)
+   --   bit3 = GPIO READ  request pulse seen since last clear (write 0x4000308 clears)
    --   bit7-4 = last GPIO read data from the cartridge controller
    --  bit15-8 = cart controller GPIO diag byte (addr/cs/wr/phi status)
    signal GPIO_DIAG_DIN     : std_logic_vector(15 downto 0) := (others => '0');
    signal GPIO_DIAG_REG     : std_logic_vector(15 downto 0) := (others => '0');
    signal GPIO_DIAG_WRITTEN : std_logic := '0';
-   signal gpio_req_seen     : std_logic := '0';
-   signal gpio_done_seen    : std_logic := '0';
+   signal gpio_write_req_seen : std_logic := '0';
+   signal gpio_read_req_seen  : std_logic := '0';
    signal REG_GPIO_TMODE    : std_logic_vector(1 downto 0) := "00";
    signal REG_IME     : std_logic_vector(work.pReg_gba_system.IME    .upper downto work.pReg_gba_system.IME    .lower) := (others => '0');                                                                                                   
    signal REG_POSTFLG : std_logic_vector(work.pReg_gba_system.POSTFLG.upper downto work.pReg_gba_system.POSTFLG.lower) := (others => '0');
@@ -970,7 +970,13 @@ begin
    -- last GPIO read data returned by the cartridge controller, so a diag ROM
    -- can distinguish "cart drove 0 (write-only / not activated)" from "cart
    -- did not drive the bus at all (floating lines)".
-   GPIO_DIAG_DIN(3 downto 0) <= gpio_done_seen & gpio_req_seen & GPIO_cart_mode & specialmodule;
+   -- bit3 = read request seen, bit2 = write request seen. The old
+   -- req/done latch pair (bit2=any req, bit3=done) could not tell whether a
+   -- GPIO READ ever left memorymux, which is exactly what we need to debug
+   -- "reads return SD ROM data instead of cartridge GPIO". Controller-side
+   -- execution is still observable via bit10 (WR# issued) / bit11 (read
+   -- sampled) in the high byte.
+   GPIO_DIAG_DIN(3 downto 0) <= gpio_read_req_seen & gpio_write_req_seen & GPIO_cart_mode & specialmodule;
    GPIO_DIAG_DIN(7 downto 4) <= GPIO_Din_muxed;
    GPIO_DIAG_DIN(15 downto 8) <= GPIO_diag_in;
    iREG_GPIO_DIAG : entity work.eProcReg_gba
@@ -988,18 +994,18 @@ begin
    begin
       if rising_edge(clk100) then
          if reset = '1' then
-            gpio_req_seen  <= '0';
-            gpio_done_seen <= '0';
+            gpio_write_req_seen <= '0';
+            gpio_read_req_seen  <= '0';
          else
             if GPIO_DIAG_WRITTEN = '1' then
-               gpio_req_seen  <= '0';
-               gpio_done_seen <= '0';
+               gpio_write_req_seen <= '0';
+               gpio_read_req_seen  <= '0';
             end if;
-            if (GPIO_readEna = '1' or GPIO_writeEna = '1') then
-               gpio_req_seen <= '1';
+            if (GPIO_writeEna = '1') then
+               gpio_write_req_seen <= '1';
             end if;
-            if GPIO_done_muxed = '1' then
-               gpio_done_seen <= '1';
+            if (GPIO_readEna = '1') then
+               gpio_read_req_seen <= '1';
             end if;
          end if;
       end if;
