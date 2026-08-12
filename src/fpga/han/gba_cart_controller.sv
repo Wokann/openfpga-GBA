@@ -221,6 +221,7 @@ module gba_cart_controller #(
     reg        save_is_write;
     reg [15:0] gpio_abs_addr;      // 0x00C4 + {gpio_addr,1'b0}
     reg [3:0]  gpio_din_r;
+    reg        gpio_rnw_r;         // latched R/W direction at request accept
     // Selected GPIO write timing (combinational from gpio_timing_mode)
     reg [7:0]  gpio_wr_addr_hold, gpio_wr_data_setup, gpio_wr_low;
     // EEPROM session: GBATEK requires /CS=LOW and A23=HIGH throughout the
@@ -276,6 +277,7 @@ module gba_cart_controller #(
             eeprom_done     <= 1'b0;
             gpio_abs_addr   <= 16'd0;
             gpio_din_r      <= 4'd0;
+            gpio_rnw_r      <= 1'b0;
             gpio_dout       <= 4'd0;
             gpio_done       <= 1'b0;
             gpio_diag       <= 8'd0;
@@ -378,6 +380,7 @@ module gba_cart_controller #(
                         // carries halfword addresses for ROM-space access.
                         gpio_abs_addr <= 16'h0062 + {14'd0, gpio_addr};
                         gpio_din_r    <= gpio_din;
+                        gpio_rnw_r    <= gpio_rnw;   // latch R/W with the request
                         acc_cnt       <= 8'd0;
                         state         <= S_GPIO_A;
                     end
@@ -637,14 +640,14 @@ module gba_cart_controller #(
                     out_bank2_dir <= 1'b1;
                     out_bank3_dir <= 1'b1;
                     gpio_diag[0]  <= 1'b1;   // request entered S_GPIO_A
-                    if (gpio_rnw) gpio_diag[7] <= 1'b1;  // read request reached the controller
+                    if (gpio_rnw_r) gpio_diag[7] <= 1'b1;  // read request reached the controller
                     cs_n          <= 1'b1;      // address setup, CS# high
                     rd_n          <= 1'b1;
                     wr_n          <= 1'b1;
                     if (acc_cnt == ADDR_SETUP - 1) begin
                         cs_n <= 1'b0;           // CS# falling edge latches addr
                         gpio_diag[1] <= 1'b1;   // CS1# went low
-                        state <= gpio_rnw ? S_GPIO_R : S_GPIO_W;
+                        state <= gpio_rnw_r ? S_GPIO_R : S_GPIO_W;
                         acc_cnt <= 8'd0;
                     end else begin
                         acc_cnt <= acc_cnt + 1'b1;

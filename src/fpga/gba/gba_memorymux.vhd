@@ -925,15 +925,26 @@ begin
                   mem_bus_done <= '1';
                   mem_bus_din    <= x"0000000" & GPIO_Din;
                   state <= IDLE;
+               else
+                  -- HAN fix: keep the request asserted until the controller
+                  -- completes it (GPIO_done). The process-wide default
+                  -- (GPIO_readEna <= '0') only applies while in IDLE; without
+                  -- this re-assert the enable was a single-cycle pulse and
+                  -- the controller always saw rnw=0 -> GPIO READs were
+                  -- executed as WRITEs (diagnostics showed ENT=0/SMP=0 with
+                  -- WR#+data driven for every access).
+                  GPIO_readEna <= '1';
                end if;
                
             when WRITE_GPIO =>
-               -- HAN 迂回：GPIO 写等待卡带控制器完成（GPIO_writeEna 为
-               -- 单周期脉冲，进入本状态即清除）
-               GPIO_writeEna <= '0';
+               -- HAN fix: same as READ_GPIO - keep the write request asserted
+               -- until the controller completes it, so a busy controller
+               -- cannot miss the request.
                if (GPIO_done = '1') then
                   mem_bus_done <= '1';
                   state        <= IDLE;
+               else
+                  GPIO_writeEna <= '1';
                end if;
                
            
