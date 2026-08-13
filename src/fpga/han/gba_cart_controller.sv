@@ -56,10 +56,12 @@ module gba_cart_controller #(
     // beat late -- a read immediately after a write returns the PREVIOUS
     // value (W5->R0, W7->R5, WF->R7), and RTC bit-banging fails. Inserting
     // a ~14ms delay between accesses makes the read-back correct and the
-    // S3511 returns a valid status byte (0x40). The S3511 tSCK spec wants
-    // >= 0.5-5us pulses; 800 cycles @100MHz = 8us per access gives a
-    // ~32us SCK period (~31kHz), inside the S3511 rating.
-    parameter integer GPIO_RECOVER = 800,
+    // S3511 returns a valid status byte (0x40). 8us was NOT enough on real
+    // hardware (still all-FF / FAIL); the ROM-chip GPIO latch apparently
+    // needs much more. 10000 cycles @100MHz = 100us per access: a 7-byte
+    // RTC read takes ~5ms, fine at boot. The S3511 tSCK spec wants
+    // >= 0.5-5us pulses, so 100us is safely inside the rating.
+    parameter integer GPIO_RECOVER = 10000,
     // insideGadgets GBxCartRead Part 3 measured the real GBA EEPROM bit
     // clock at ~600 ns full period (~300 ns half) on a logic analyser.
     // HALF_CYCLE=50 gives ~620 ns bit period, matching the real bus.

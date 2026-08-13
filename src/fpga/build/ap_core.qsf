@@ -325,7 +325,7 @@ set_global_assignment -name PLACEMENT_EFFORT_MULTIPLIER 4.0
 set_global_assignment -name ROUTER_TIMING_OPTIMIZATION_LEVEL MAXIMUM
 
 # Timing Closure: scoped optimizations for DMA-to-memorymux critical path
-set_instance_assignment -name AUTO_RESOURCE_SHARING OFF -to "ic|igba|igba_memorymux|*"
+set_instance_assignment -name AUTO_RESOURCE_SHARING OFF -to ic|igba|igba_memorymux|*
 
 # Assembler Assignments
 # =====================
