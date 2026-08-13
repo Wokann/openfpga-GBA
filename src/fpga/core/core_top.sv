@@ -239,12 +239,15 @@ wire        han_rom_cart_mode;
 wire        han_save_cart_mode;
 wire        han_gpio_cart_mode;
 wire        han_eeprom_cart_mode;
+wire        han_cart_cfg_s;      // synced 迂回模式 switch (interact 0x90)
 // 迂回汉化：ROM 从 SD 卡运行；实体卡带只承担存档/EEPROM/GPIO。
 // （外挂汉化模式=1 时 ROM 走卡带，作为未来功能保留）
 assign han_rom_cart_mode  = 1'b0;
-assign han_save_cart_mode = 1'b1;   // 迂回汉化：存档读写走卡带槽实体卡带
-assign han_gpio_cart_mode = 1'b1;   // 迂回汉化：RTC/震动/太阳/陀螺走卡带硬件
-assign han_eeprom_cart_mode = 1'b1; // 迂回汉化：EEPROM 位流走卡带槽实体芯片
+// Interact menu 0x90 controls the whole 迂回 mode: 1 = cart save/EEPROM/GPIO,
+// 0 = original core logic (SD save + internal RTC/EEPROM simulation).
+assign han_save_cart_mode   = han_cart_cfg_s;
+assign han_gpio_cart_mode   = han_cart_cfg_s;
+assign han_eeprom_cart_mode = han_cart_cfg_s;
 
 wire        han_cart_rd_req;
 wire [24:0] han_cart_rd_addr;
@@ -1511,6 +1514,8 @@ reg [1:0] ff_mode = 0;    // 0 = Hold, 1 = Toggle, 2 = Disabled
 reg force_rtc = 0;        // 0 = Off, 1 = Force enable RTC/GPIO
 reg [1:0] turbo_mode = 0; // 0 = Disabled, 1 = Turbo A, 2 = Turbo B
 reg ff_video_stable = 1'b1; // 0 = Classic FF, 1 = wait for complete rendered lines
+reg han_cart_cfg = 1'b1;        // 0 = SD save / sim GPIO/EEPROM, 1 = cart hardware
+reg han_cart_cfg_received = 0;  // boot-time persist write applies without reset
 
 reg [13:0] reset_counter = 0;
 wire       core_reset = (reset_counter != 0);
@@ -1526,6 +1531,19 @@ always @(posedge clk_74a) begin
         32'h84: force_rtc      <= bridge_wr_data[0];
         32'h88: turbo_mode     <= bridge_wr_data[1:0];
         32'h8C: ff_video_stable <= bridge_wr_data[0];
+        32'h90: begin
+            // 迂回模式 toggle. The first write (boot-time persist from the
+            // Pocket menu) applies immediately without a reset; any later
+            // menu change restarts the core so save/EEPROM/GPIO routing is
+            // cleanly re-established under the new mode.
+            if (han_cart_cfg_received && (han_cart_cfg != bridge_wr_data[0])) begin
+                han_cart_cfg <= bridge_wr_data[0];
+                reset_counter <= 14'd8000;   // ~108 us core reset
+            end else begin
+                han_cart_cfg <= bridge_wr_data[0];
+                han_cart_cfg_received <= 1'b1;
+            end
+        end
         endcase
     end
 end
@@ -1542,6 +1560,8 @@ synch_3 #(.WIDTH(2)) turbo_mode_sync(turbo_mode, turbo_mode_s, clk_sys);
 
 wire ff_video_stable_s;
 synch_3 ff_video_stable_sync(ff_video_stable, ff_video_stable_s, clk_sys);
+
+synch_3 han_cart_cfg_sync(han_cart_cfg, han_cart_cfg_s, clk_sys);
 
 // ============================================================
 // Section 4: Video Output — framebuffer + raster scan
