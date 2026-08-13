@@ -929,15 +929,18 @@ rom_source_mux u_rom_mux (
 
 // ---- Cartridge presence probe ----
 // After the data slots complete, read the physical cart ROM header area
-// once (0x000000B0..0x000000BF, 4 DWORDs). An empty slot reads all-FF
-// (floating bus); a blank ROM region would read all-zero. If the whole
-// range is neither all-FF nor all-zero a cart is really present.
+// TWICE (0x000000B0..0x000000BF, 4 DWORDs per pass). An empty slot reads
+// all-FF (weak pull-ups); a blank region would read all-zero; a half-
+// inserted cart gives a flaky bus whose reads differ between passes. A cart
+// is only declared present when both passes read the same non-blank data.
 // cart_detect gates the whole 迂回 mode: no cart => original core logic
 // even if the interact menu says On.
 reg [2:0]  cart_probe_state = 0;
 reg [31:0] cart_probe_acc_or = 0;
 reg [31:0] cart_probe_acc_and = 32'hFFFFFFFF;
-reg [1:0]  cart_probe_count = 0;
+reg [31:0] cart_probe_words [0:3];
+reg [2:0]  cart_probe_count = 0;   // 0..7: two passes x four words
+reg        cart_probe_match = 1;
 reg [15:0] cart_probe_timer = 0;
 reg        cart_probe_done = 0;
 
@@ -952,7 +955,8 @@ always @(posedge clk_sys) begin
         cart_probe_done  <= 1'b0;
         cart_detect      <= 1'b0;
         cart_probe_timer <= 16'd0;
-        cart_probe_count <= 2'd0;
+        cart_probe_count <= 3'd0;
+        cart_probe_match <= 1'b1;
         cart_probe_acc_or  <= 32'd0;
         cart_probe_acc_and <= 32'hFFFFFFFF;
     end else begin
@@ -969,13 +973,20 @@ always @(posedge clk_sys) begin
             if (han_cart_rd_ready) begin
                 cart_probe_acc_or  <= cart_probe_acc_or | han_cart_rd_data;
                 cart_probe_acc_and <= cart_probe_acc_and & han_cart_rd_data;
-                if (cart_probe_count == 2'd3) begin
-                    // all four DWORDs read
+                if (cart_probe_count[2] == 1'b0) begin
+                    // first pass: store
+                    cart_probe_words[cart_probe_count[1:0]] <= han_cart_rd_data;
+                end else if (cart_probe_words[cart_probe_count[1:0]] != han_cart_rd_data) begin
+                    // second pass: flaky bus (half-inserted cart) => no cart
+                    cart_probe_match <= 1'b0;
+                end
+                if (cart_probe_count == 3'd7) begin
+                    // both passes complete
                     cart_probe_req   <= 1'b0;
                     cart_probe_state <= 3'd2;
                 end else begin
                     cart_probe_count <= cart_probe_count + 1'b1;
-                    cart_probe_addr  <= cart_probe_addr + 1'b1;
+                    cart_probe_addr  <= 25'h2C + {1'b0, cart_probe_count[1:0] + 1'b1};
                     cart_probe_timer <= 16'd4000;
                     // probe_req stays high: cart controller reads the next word
                 end
@@ -989,9 +1000,11 @@ always @(posedge clk_sys) begin
             end
         end
         3'd2: begin
-            // whole 0xB0..0xBF range neither all-zero nor all-FF
+            // whole 0xB0..0xBF range neither all-zero nor all-FF, and both
+            // passes identical
             cart_detect      <= (cart_probe_acc_or != 32'd0) &&
-                                (cart_probe_acc_and != 32'hFFFFFFFF);
+                                (cart_probe_acc_and != 32'hFFFFFFFF) &&
+                                cart_probe_match;
             cart_probe_done  <= 1'b1;
             cart_probe_state <= 3'd0;
         end
