@@ -99,7 +99,7 @@
         ]
       },
       {
-        "name": "迂回模式（卡带硬件）",
+        "name": "Cart Hardware Mode",
         "id": 40,
         "type": "list",
         "enabled": true,
@@ -109,11 +109,11 @@
         "defaultval": 1,
         "options": [
           {
-            "name": "开：卡带存档/RTC",
+            "name": "On - Cart Save/RTC",
             "value": 1
           },
           {
-            "name": "关：SD存档/模拟RTC",
+            "name": "Off - SD Save/Sim",
             "value": 0
           }
         ]

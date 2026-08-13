@@ -111,6 +111,11 @@ entity gba_memorymux is
       GPIO_Dout            : out    std_logic_vector(3 downto 0);
       GPIO_writeEna        : out    std_logic := '0';
       GPIO_addr            : out    std_logic_vector(1 downto 0);
+      -- HAN: 1 = GPIO answered by the cartridge controller (needs the
+      -- request to stay asserted until GPIO_done); 0 = internal simulator
+      -- (original core behaviour: writes complete immediately, the
+      -- simulator only pulses GPIO_done for reads).
+      GPIO_cart_mode_in    : in     std_logic := '0';
 
       -- HAN: external (cartridge) EEPROM bit-serial forwarding
       -- When EEPROM_cart_mode = 1, EEPROM accesses are forwarded one bit at
@@ -926,21 +931,24 @@ begin
                   mem_bus_din    <= x"0000000" & GPIO_Din;
                   state <= IDLE;
                else
-                  -- HAN fix: keep the request asserted until the controller
-                  -- completes it (GPIO_done). The process-wide default
-                  -- (GPIO_readEna <= '0') only applies while in IDLE; without
-                  -- this re-assert the enable was a single-cycle pulse and
-                  -- the controller always saw rnw=0 -> GPIO READs were
-                  -- executed as WRITEs (diagnostics showed ENT=0/SMP=0 with
-                  -- WR#+data driven for every access).
-                  GPIO_readEna <= '1';
+                  -- HAN fix: in cart mode keep the request asserted until
+                  -- the controller completes it (GPIO_done); the original
+                  -- single-cycle pulse let the controller see rnw=0 and
+                  -- execute reads as writes. In internal-sim mode keep the
+                  -- original pulse semantics (simulator answers instantly).
+                  GPIO_readEna <= GPIO_cart_mode_in;
                end if;
                
             when WRITE_GPIO =>
-               -- HAN fix: same as READ_GPIO - keep the write request asserted
-               -- until the controller completes it, so a busy controller
-               -- cannot miss the request.
-               if (GPIO_done = '1') then
+               -- HAN fix: cart mode waits for the controller to finish so a
+               -- busy cart controller cannot miss the request. Internal-sim
+               -- mode keeps the original core behaviour: the write completes
+               -- immediately (the internal simulator never pulses
+               -- GPIO_done for writes, so waiting would hang the CPU).
+               if (GPIO_cart_mode_in = '0') then
+                  mem_bus_done <= '1';
+                  state        <= IDLE;
+               elsif (GPIO_done = '1') then
                   mem_bus_done <= '1';
                   state        <= IDLE;
                else

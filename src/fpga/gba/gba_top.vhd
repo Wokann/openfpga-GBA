@@ -695,6 +695,7 @@ begin
       GPIO_Dout            => GPIO_Dout,    
       GPIO_writeEna        => GPIO_writeEna,
       GPIO_addr            => GPIO_addr,
+      GPIO_cart_mode_in    => GPIO_cart_mode,
 
       EEPROM_cart_mode     => EEPROM_cart_mode,
       EEPROM_ext_req       => EEPROM_ext_req_int,
