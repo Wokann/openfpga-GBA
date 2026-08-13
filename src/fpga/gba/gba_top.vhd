@@ -51,6 +51,9 @@ entity gba_top is
       GPIO_done_in          : in     std_logic := '0';             -- read/write done pulse
       GPIO_diag_in          : in     std_logic_vector(7 downto 0) := (others => '0'); -- cart controller diag byte
       GPIO_timing_mode_out  : out    std_logic_vector(2 downto 0) := "000"; -- GPIO write timing mode (0x400030A, modes 0..5)
+      -- HAN: GPIO inter-access recovery override (0x4000310, cycles @100MHz,
+      -- 0 = compiled-in default). Lets the diag ROM sweep the settle time.
+      GPIO_recover_out      : out    std_logic_vector(13 downto 0) := (others => '0');
       -- HAN: EEPROM bit-serial forwarding to physical cartridge
       EEPROM_cart_mode      : in     std_logic := '0';             -- 1 = EEPROM handled by cart
       EEPROM_ext_req_out    : out    std_logic := '0';             -- bit access request pulse
@@ -357,6 +360,7 @@ architecture arch of gba_top is
    signal gpio_write_req_seen : std_logic := '0';
    signal gpio_read_req_seen  : std_logic := '0';
    signal REG_GPIO_TMODE    : std_logic_vector(2 downto 0) := "000";
+   signal REG_GPIO_RECOVER  : std_logic_vector(13 downto 0) := (others => '0');
    -- HAN: SD log capture state
    signal LOG_DATA_REG     : std_logic_vector(7 downto 0) := (others => '0');
    signal LOG_DATA_WRITTEN : std_logic := '0';
@@ -1008,6 +1012,13 @@ begin
       generic map ((16#30A#, 2, 0, 0, 0, readwrite))
       port map (clk100, gb_bus, (REG_GPIO_TMODE'range => '0'), REG_GPIO_TMODE);
    GPIO_timing_mode_out <= REG_GPIO_TMODE;
+   -- HAN: GPIO inter-access recovery override (0x4000310, 14 bits, cycles
+   -- @100MHz; 0 = use the compiled-in default). Written by the diag ROM to
+   -- sweep the settle time on real carts without rebuilding the bitstream.
+   iREG_GPIO_RECOVER : entity work.eProcReg_gba
+      generic map ((16#310#, 13, 0, 0, 0, readwrite))
+      port map (clk100, gb_bus, (REG_GPIO_RECOVER'range => '0'), REG_GPIO_RECOVER);
+   GPIO_recover_out <= REG_GPIO_RECOVER;
 
    -- HAN: SD log write port (0x400030C, readwrite so the CPU write cycle
    -- completes). Each CPU write appends the low byte to the 4KB log buffer

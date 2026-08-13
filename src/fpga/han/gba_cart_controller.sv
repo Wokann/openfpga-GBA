@@ -146,6 +146,11 @@ module gba_cart_controller #(
     //      slow enough to exceed the S3511 tSCK minimum pulse)
     //   5: addr-hold 255, data-setup 200, WR#-low 255 (~12us, diagnostic)
     input  wire [2:0]  gpio_timing_mode,
+    // Runtime GPIO inter-access recovery override (cycles @100MHz, 0 =
+    // use the GPIO_RECOVER parameter). Written by the diag ROM via
+    // 0x4000310 so the settle time can be swept on real carts without
+    // rebuilding the bitstream.
+    input  wire [13:0] gpio_recover_set,
 
     // ---- status / debug ----
     // GPIO diagnostic byte (read by the diag ROM via 0x4000308 bit15-8):
@@ -231,7 +236,7 @@ module gba_cart_controller #(
     reg [3:0]  state;
     reg [1:0]  word_idx;
     reg [24:0] byte_addr;
-    reg [7:0]  acc_cnt;
+    reg [13:0] acc_cnt;
     reg [15:0] words [0:3];
     reg [16:0] save_addr_r;
     reg        save_is_write;
@@ -277,6 +282,13 @@ module gba_cart_controller #(
             default: begin gpio_wr_addr_hold = 8'd8; gpio_wr_data_setup = 8'd4; gpio_wr_low = 8'd16; end
         endcase
     end
+
+    // Effective inter-access recovery: runtime register wins, otherwise the
+    // compiled-in GPIO_RECOVER parameter. 14 bits covers 0..16383 cycles
+    // (~164us @100MHz); the register counter must be this wide too so the
+    // wait can never wrap (an 8-bit acc_cnt silently turned 800/10000 into
+    // a wrong or stuck recovery).
+    wire [13:0] gpio_recover_wait = gpio_recover_set ? gpio_recover_set : GPIO_RECOVER[13:0];
 
     always @(posedge clk or negedge reset_n) begin
         if (!reset_n) begin
@@ -782,7 +794,7 @@ module gba_cart_controller #(
                     rd_n  <= 1'b1;
                     wr_n  <= 1'b1;
                     cs_n  <= 1'b1;
-                    if (acc_cnt < GPIO_RECOVER - 1) begin
+                    if (acc_cnt < gpio_recover_wait - 1) begin
                         acc_cnt <= acc_cnt + 1'b1;
                     end else begin
                         acc_cnt <= 8'd0;

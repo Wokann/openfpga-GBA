@@ -320,6 +320,7 @@ gba_cart_controller #(
     .gpio_dout              ( han_cart_gpio_dout ),
     .gpio_done              ( han_cart_gpio_done ),
     .gpio_timing_mode       ( han_cart_gpio_tmode ),
+    .gpio_recover_set       ( han_cart_gpio_recover ),
     .gpio_diag              ( han_cart_gpio_diag ),
     .eeprom_req             ( han_cart_eeprom_req ),
     .eeprom_rnw             ( han_cart_eeprom_rnw ),
@@ -343,6 +344,8 @@ wire        gba_eeprom_dma_w;
 wire        gba_eeprom_dout_w, gba_eeprom_done_w;
 // HAN: WAITCNT PHI terminal select (bit12..11) from gba_top -> cartridge controller
 wire [1:0]  gba_phi_sel;
+// HAN: GPIO inter-access recovery override (0x4000310) from gba_top -> cart controller
+wire [13:0] han_cart_gpio_recover;
 // HAN: diagnostic cart-ROM mode switch (0x4000304 bit0)
 wire        diag_cart_rom;
 // HAN: SD diagnostic log bridge (gba_top <-> core_top) - dedicated BRAM,
@@ -2057,6 +2060,7 @@ gba_top #(
     .GPIO_done_in        ( gba_gpio_done_in_w ),
     .GPIO_diag_in        ( gba_gpio_diag_w ),
     .GPIO_timing_mode_out( han_cart_gpio_tmode ),
+    .GPIO_recover_out  ( han_cart_gpio_recover ),
     // HAN EEPROM bridge (cart hardware mode)
     .EEPROM_cart_mode    ( han_eeprom_cart_mode ),
     .EEPROM_ext_req_out  ( gba_eeprom_req_w ),

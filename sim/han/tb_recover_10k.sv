@@ -1,5 +1,10 @@
 `timescale 1ns/1ps
-module tb_gpio_recover;
+// Regression check for the real 100us recovery: with GPIO_RECOVER=10000
+// and the 14-bit acc_cnt the controller must return to S_IDLE between
+// accesses (an 8-bit acc_cnt silently wrapped and either hung or shortened
+// the recovery). Runtime override register (gpio_recover_set) is tied to 0
+// so the parameter is used.
+module tb_recover_10k;
   logic clk = 0;
   logic reset_n = 0;
   always #5 clk = ~clk;  // 100MHz
@@ -40,7 +45,7 @@ module tb_gpio_recover;
   logic [7:0]  err_count;
 
   gba_cart_controller #(
-    .GPIO_RECOVER(20)  // shortened for simulation
+    .GPIO_RECOVER(10000)
   ) dut (
     .clk(clk), .reset_n(reset_n),
     .phi_sel(phi_sel),
@@ -96,8 +101,8 @@ module tb_gpio_recover;
     issue_write(4'h7);
     issue_write(4'hF);
     #50;
-    $display("PASS: GPIO writes=%0d, cycles between done pulses=%0d (expect > 20+GPIO_RECOVER)", writes, cycles_between);
-    if (writes != 3 || cycles_between < 30) begin
+    $display("PASS: GPIO writes=%0d, cycles between done pulses=%0d (expect > 10000)", writes, cycles_between);
+    if (writes != 3 || cycles_between < 10000) begin
       $display("FAIL: unexpected counts");
       $finish(1);
     end
