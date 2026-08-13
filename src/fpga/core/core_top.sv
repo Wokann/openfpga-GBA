@@ -240,17 +240,18 @@ wire        han_save_cart_mode;
 wire        han_gpio_cart_mode;
 wire        han_eeprom_cart_mode;
 wire        han_cart_cfg_s;      // synced 迂回模式 switch (interact 0x90)
+reg         cart_detect = 0;     // 1 = physical cart ROM header probe passed
 // 迂回汉化：ROM 从 SD 卡运行；实体卡带只承担存档/EEPROM/GPIO。
 // （外挂汉化模式=1 时 ROM 走卡带，作为未来功能保留）
 assign han_rom_cart_mode  = 1'b0;
 // Interact menu 0x90 controls the whole 迂回 mode: 1 = cart save/EEPROM/GPIO,
 // 0 = original core logic (SD save + internal RTC/EEPROM simulation).
-assign han_save_cart_mode   = han_cart_cfg_s;
-assign han_gpio_cart_mode   = han_cart_cfg_s;
-assign han_eeprom_cart_mode = han_cart_cfg_s;
+// Even when the menu says On, no physical cart in the slot forces the
+// original logic (cart_detect = 0 until the ROM header probe passes).
+assign han_save_cart_mode   = han_cart_cfg_s & cart_detect;
+assign han_gpio_cart_mode   = han_cart_cfg_s & cart_detect;
+assign han_eeprom_cart_mode = han_cart_cfg_s & cart_detect;
 
-wire        han_cart_rd_req;
-wire [24:0] han_cart_rd_addr;
 wire        han_cart_rd_ready;
 wire [31:0] han_cart_rd_data;
 wire [31:0] han_cart_rd_data_second;
@@ -897,6 +898,15 @@ wire [31:0] rom_rd_data_second;
 wire        sdram_rd_req_from_mux;
 wire [24:0] sdram_rd_addr_from_mux;
 
+// Cartridge presence probe: while probing, drive the cart controller read
+// port directly; otherwise forward the ROM-source mux cart request.
+wire        cart_rd_req_from_mux;
+wire [24:0] cart_rd_addr_from_mux;
+reg         cart_probe_req = 0;
+reg  [24:0] cart_probe_addr = 0;
+wire        han_cart_rd_req  = cart_probe_req ? 1'b1 : cart_rd_req_from_mux;
+wire [24:0] han_cart_rd_addr = cart_probe_req ? cart_probe_addr : cart_rd_addr_from_mux;
+
 rom_source_mux u_rom_mux (
     .clk                 ( clk_sys ),
     .cart_mode           ( han_rom_cart_mode | diag_cart_rom ),
@@ -910,12 +920,85 @@ rom_source_mux u_rom_mux (
     .sdram_rd_ready      ( sdram_rd_ready ),
     .sdram_rd_data       ( sdram_rd_data ),
     .sdram_rd_data_second( sdram_rd_data_second ),
-    .cart_rd_req         ( han_cart_rd_req ),
-    .cart_rd_addr        ( han_cart_rd_addr ),
+    .cart_rd_req         ( cart_rd_req_from_mux ),
+    .cart_rd_addr        ( cart_rd_addr_from_mux ),
     .cart_rd_ready       ( han_cart_rd_ready ),
     .cart_rd_data        ( han_cart_rd_data ),
     .cart_rd_data_second ( han_cart_rd_data_second )
 );
+
+// ---- Cartridge presence probe ----
+// After the data slots complete, read the physical cart ROM header once.
+// A valid GBA header (branch opcode 0xEAxxxxxx at 0x000000 plus a non-blank
+// title word at 0x0000A0) means a cart is really in the slot. cart_detect
+// gates the whole 迂回 mode: no cart => original core logic even if the
+// interact menu says On.
+reg [2:0]  cart_probe_state = 0;
+reg [31:0] cart_probe_d0 = 0, cart_probe_d1 = 0;
+reg [15:0] cart_probe_timer = 0;
+reg        cart_probe_done = 0;
+
+wire cart_probe_start = dataslot_allcomplete_s && !cart_probe_done;
+
+always @(posedge clk_sys) begin
+    if (!pll_core_locked || core_reset_s) begin
+        // Re-probe on boot and after every core restart (menu change), so a
+        // cart inserted after a failed probe gets picked up.
+        cart_probe_state <= 3'd0;
+        cart_probe_req   <= 1'b0;
+        cart_probe_done  <= 1'b0;
+        cart_detect      <= 1'b0;
+        cart_probe_timer <= 16'd0;
+    end else begin
+        case (cart_probe_state)
+        3'd0: begin
+            if (cart_probe_start) begin
+                cart_probe_req   <= 1'b1;
+                cart_probe_addr  <= 25'd0;     // 0x08000000 (DWORD 0)
+                cart_probe_timer <= 16'd4000;  // ~40us timeout
+                cart_probe_state <= 3'd1;
+            end
+        end
+        3'd1: begin
+            if (han_cart_rd_ready) begin
+                cart_probe_d0    <= han_cart_rd_data;
+                cart_probe_req   <= 1'b0;
+                cart_probe_addr  <= 25'd40;    // 0x080000A0 >> 2
+                cart_probe_timer <= 16'd4000;
+                cart_probe_state <= 3'd2;
+            end else if (cart_probe_timer == 0) begin
+                cart_probe_req   <= 1'b0;
+                cart_probe_done  <= 1'b1;
+                cart_detect      <= 1'b0;
+                cart_probe_state <= 3'd0;
+            end else begin
+                cart_probe_timer <= cart_probe_timer - 1'b1;
+            end
+        end
+        3'd2: begin
+            if (han_cart_rd_ready) begin
+                cart_probe_d1    <= han_cart_rd_data;
+                cart_probe_req   <= 1'b0;
+                cart_probe_state <= 3'd3;
+            end else if (cart_probe_timer == 0) begin
+                cart_probe_req   <= 1'b0;
+                cart_probe_done  <= 1'b1;
+                cart_detect      <= 1'b0;
+                cart_probe_state <= 3'd0;
+            end else begin
+                cart_probe_timer <= cart_probe_timer - 1'b1;
+            end
+        end
+        3'd3: begin
+            cart_detect      <= (cart_probe_d0[31:24] == 8'hEA) &&
+                                (cart_probe_d1 != 32'h00000000) &&
+                                (cart_probe_d1 != 32'hFFFFFFFF);
+            cart_probe_done  <= 1'b1;
+            cart_probe_state <= 3'd0;
+        end
+        endcase
+    end
+end
 
 // Mux SDRAM ch1 read port: ROM reads (via rom_source_mux) OR staging reads
 // During Phase 2 core is paused (sleep_savestate), no ROM reads conflict.
@@ -1166,7 +1249,12 @@ synch_3 s_reset_n(reset_n, reset_n_s, clk_sys);
 wire core_reset_s;
 synch_3 s_core_reset(core_reset, core_reset_s, clk_sys);
 
-wire reset_gba = ~pll_core_locked | ~dataslot_allcomplete_s | ~reset_n_s | core_reset_s | ~save_mem_ready;
+// Hold the GBA in reset until the cartridge presence probe has finished, so
+// the save/EEPROM/GPIO routing (which depends on cart_detect) is fixed
+// before the game starts. Without a cart the probe times out (~80us) and
+// the core runs in original SD-save/simulated-RTC mode.
+wire reset_gba = ~pll_core_locked | ~dataslot_allcomplete_s | ~reset_n_s |
+                 core_reset_s | ~save_mem_ready | ~cart_probe_done;
 
 // ---- BIOS Loading via data_loader → gba_top internal BRAM ----
 // BIOS (16 KB) loads from data slot 4 at address 0x3xxxxxxx
