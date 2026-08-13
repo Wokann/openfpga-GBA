@@ -1568,23 +1568,32 @@ always @(posedge clk_sys) begin
     end
 end
 
-reg [31:0] han_log_ram [0:1023];
+// 4KB log buffer as four 1024x8 byte-lane RAMs. Each lane has one write
+// port (clk_sys, gated by its byte enable) and one read port (clk_74a).
+// This is the canonical Quartus dual-clock RAM pattern; the earlier
+// single 32-bit array with a case-based partial-word write was NOT
+// inferred as block RAM and blew up into ~30k logic registers.
+(* ramstyle = "M10K" *) reg [7:0] han_log_ram0 [0:1023];
+(* ramstyle = "M10K" *) reg [7:0] han_log_ram1 [0:1023];
+(* ramstyle = "M10K" *) reg [7:0] han_log_ram2 [0:1023];
+(* ramstyle = "M10K" *) reg [7:0] han_log_ram3 [0:1023];
 always @(posedge clk_sys) begin
     if (han_log_wr_en_r) begin
-        case (han_log_wr_be_r)
-        4'b0001: han_log_ram[han_log_wr_addr_r][ 7: 0] <= han_log_wr_data_r[ 7: 0];
-        4'b0010: han_log_ram[han_log_wr_addr_r][15: 8] <= han_log_wr_data_r[15: 8];
-        4'b0100: han_log_ram[han_log_wr_addr_r][23:16] <= han_log_wr_data_r[23:16];
-        4'b1000: han_log_ram[han_log_wr_addr_r][31:24] <= han_log_wr_data_r[31:24];
-        default: ;
-        endcase
+        if (han_log_wr_be_r[0]) han_log_ram0[han_log_wr_addr_r] <= han_log_wr_data_r[ 7: 0];
+        if (han_log_wr_be_r[1]) han_log_ram1[han_log_wr_addr_r] <= han_log_wr_data_r[15: 8];
+        if (han_log_wr_be_r[2]) han_log_ram2[han_log_wr_addr_r] <= han_log_wr_data_r[23:16];
+        if (han_log_wr_be_r[3]) han_log_ram3[han_log_wr_addr_r] <= han_log_wr_data_r[31:24];
     end
 end
 
-// read port (clk_74a) for the bridge / 0184 transfer
+// read port (clk_74a) for the bridge / 0184 transfer: assemble the 32-bit
+// word from the four byte lanes in parallel.
 reg [31:0] han_log_ram_rd_q;
 always @(posedge clk_74a) begin
-    han_log_ram_rd_q <= han_log_ram[bridge_addr[11:2]];
+    han_log_ram_rd_q <= {han_log_ram3[bridge_addr[11:2]],
+                         han_log_ram2[bridge_addr[11:2]],
+                         han_log_ram1[bridge_addr[11:2]],
+                         han_log_ram0[bridge_addr[11:2]]};
 end
 
 // flush request CDC (clk_sys pulse -> clk_74a rising edge)
