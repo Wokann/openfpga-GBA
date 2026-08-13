@@ -928,13 +928,16 @@ rom_source_mux u_rom_mux (
 );
 
 // ---- Cartridge presence probe ----
-// After the data slots complete, read the physical cart ROM header once.
-// A valid GBA header (branch opcode 0xEAxxxxxx at 0x000000 plus a non-blank
-// title word at 0x0000A0) means a cart is really in the slot. cart_detect
-// gates the whole 迂回 mode: no cart => original core logic even if the
-// interact menu says On.
+// After the data slots complete, read the physical cart ROM header area
+// once (0x000000B0..0x000000BF, 4 DWORDs). An empty slot reads all-FF
+// (floating bus); a blank ROM region would read all-zero. If the whole
+// range is neither all-FF nor all-zero a cart is really present.
+// cart_detect gates the whole 迂回 mode: no cart => original core logic
+// even if the interact menu says On.
 reg [2:0]  cart_probe_state = 0;
-reg [31:0] cart_probe_d0 = 0, cart_probe_d1 = 0;
+reg [31:0] cart_probe_acc_or = 0;
+reg [31:0] cart_probe_acc_and = 32'hFFFFFFFF;
+reg [1:0]  cart_probe_count = 0;
 reg [15:0] cart_probe_timer = 0;
 reg        cart_probe_done = 0;
 
@@ -949,23 +952,33 @@ always @(posedge clk_sys) begin
         cart_probe_done  <= 1'b0;
         cart_detect      <= 1'b0;
         cart_probe_timer <= 16'd0;
+        cart_probe_count <= 2'd0;
+        cart_probe_acc_or  <= 32'd0;
+        cart_probe_acc_and <= 32'hFFFFFFFF;
     end else begin
         case (cart_probe_state)
         3'd0: begin
             if (cart_probe_start) begin
                 cart_probe_req   <= 1'b1;
-                cart_probe_addr  <= 25'd0;     // 0x08000000 (DWORD 0)
+                cart_probe_addr  <= 25'h2C;    // 0x000000B0 >> 2
                 cart_probe_timer <= 16'd4000;  // ~40us timeout
                 cart_probe_state <= 3'd1;
             end
         end
         3'd1: begin
             if (han_cart_rd_ready) begin
-                cart_probe_d0    <= han_cart_rd_data;
-                cart_probe_req   <= 1'b0;
-                cart_probe_addr  <= 25'd40;    // 0x080000A0 >> 2
-                cart_probe_timer <= 16'd4000;
-                cart_probe_state <= 3'd2;
+                cart_probe_acc_or  <= cart_probe_acc_or | han_cart_rd_data;
+                cart_probe_acc_and <= cart_probe_acc_and & han_cart_rd_data;
+                if (cart_probe_count == 2'd3) begin
+                    // all four DWORDs read
+                    cart_probe_req   <= 1'b0;
+                    cart_probe_state <= 3'd2;
+                end else begin
+                    cart_probe_count <= cart_probe_count + 1'b1;
+                    cart_probe_addr  <= cart_probe_addr + 1'b1;
+                    cart_probe_timer <= 16'd4000;
+                    // probe_req stays high: cart controller reads the next word
+                end
             end else if (cart_probe_timer == 0) begin
                 cart_probe_req   <= 1'b0;
                 cart_probe_done  <= 1'b1;
@@ -976,23 +989,9 @@ always @(posedge clk_sys) begin
             end
         end
         3'd2: begin
-            if (han_cart_rd_ready) begin
-                cart_probe_d1    <= han_cart_rd_data;
-                cart_probe_req   <= 1'b0;
-                cart_probe_state <= 3'd3;
-            end else if (cart_probe_timer == 0) begin
-                cart_probe_req   <= 1'b0;
-                cart_probe_done  <= 1'b1;
-                cart_detect      <= 1'b0;
-                cart_probe_state <= 3'd0;
-            end else begin
-                cart_probe_timer <= cart_probe_timer - 1'b1;
-            end
-        end
-        3'd3: begin
-            cart_detect      <= (cart_probe_d0[31:24] == 8'hEA) &&
-                                (cart_probe_d1 != 32'h00000000) &&
-                                (cart_probe_d1 != 32'hFFFFFFFF);
+            // whole 0xB0..0xBF range neither all-zero nor all-FF
+            cart_detect      <= (cart_probe_acc_or != 32'd0) &&
+                                (cart_probe_acc_and != 32'hFFFFFFFF);
             cart_probe_done  <= 1'b1;
             cart_probe_state <= 3'd0;
         end
