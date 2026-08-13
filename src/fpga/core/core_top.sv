@@ -345,6 +345,15 @@ wire        gba_eeprom_dout_w, gba_eeprom_done_w;
 wire [1:0]  gba_phi_sel;
 // HAN: diagnostic cart-ROM mode switch (0x4000304 bit0)
 wire        diag_cart_rom;
+// HAN: SD diagnostic log bridge (gba_top <-> core_top) - dedicated BRAM,
+// fully independent of the .sav slot and the physical cartridge saves
+wire        han_log_wr_en;
+wire [11:0] han_log_wr_addr;
+wire [7:0]  han_log_wr_data;
+wire [11:0] han_log_len;
+wire        han_log_flush_req;
+wire        han_log_clear_req;
+wire [2:0]  han_log_status;
 
 // GPIO requests from gba_top -> cartridge controller
 assign han_cart_gpio_req  = gba_gpio_read_ena | gba_gpio_write_ena;
@@ -1529,6 +1538,149 @@ core_bridge_cmd icb (
 // Section 3: Bridge Read Mux
 // ============================================================
 
+// ---- HAN: SD diagnostic log capture (independent of saves) ----
+// The diag ROM streams text into 0x400030C; bytes land in a 4KB
+// dual-clock BRAM (write clk_sys / read clk_74a). Writing bit0 of
+// 0x400030E requests a flush: core issues APF target command 0184
+// (data slot write) so the Pocket OS stores the buffer as <rom>.log
+// on the SD card. Nothing here touches the .sav slot or the physical
+// cartridge save area.
+
+// write port (clk_sys = GBA clock)
+reg  [9:0]  han_log_wr_addr_r;
+reg  [3:0]  han_log_wr_be_r;
+reg  [31:0] han_log_wr_data_r;
+reg         han_log_wr_en_r;
+always @(posedge clk_sys) begin
+    han_log_wr_en_r <= 1'b0;
+    if (~pll_core_locked) begin
+        han_log_wr_addr_r <= 10'd0;
+        han_log_wr_be_r   <= 4'b0000;
+        han_log_wr_data_r <= 32'd0;
+    end else if (han_log_wr_en) begin
+        han_log_wr_addr_r <= han_log_wr_addr[11:2];
+        han_log_wr_be_r   <= 4'b0001 << han_log_wr_addr[1:0];
+        han_log_wr_data_r <= ({24'd0, han_log_wr_data}) << (8 * han_log_wr_addr[1:0]);
+        han_log_wr_en_r   <= 1'b1;
+    end
+end
+
+reg [31:0] han_log_ram [0:1023];
+always @(posedge clk_sys) begin
+    if (han_log_wr_en_r) begin
+        case (han_log_wr_be_r)
+        4'b0001: han_log_ram[han_log_wr_addr_r][ 7: 0] <= han_log_wr_data_r[ 7: 0];
+        4'b0010: han_log_ram[han_log_wr_addr_r][15: 8] <= han_log_wr_data_r[15: 8];
+        4'b0100: han_log_ram[han_log_wr_addr_r][23:16] <= han_log_wr_data_r[23:16];
+        4'b1000: han_log_ram[han_log_wr_addr_r][31:24] <= han_log_wr_data_r[31:24];
+        default: ;
+        endcase
+    end
+end
+
+// read port (clk_74a) for the bridge / 0184 transfer
+reg [31:0] han_log_ram_rd_q;
+always @(posedge clk_74a) begin
+    han_log_ram_rd_q <= han_log_ram[bridge_addr[11:2]];
+end
+
+// flush request CDC (clk_sys pulse -> clk_74a rising edge)
+wire han_log_flush_s;
+wire han_log_flush_rise;
+synch_3 han_log_flush_sync (
+    .i    ( han_log_flush_req ),
+    .o    ( han_log_flush_s ),
+    .clk  ( clk_74a ),
+    .rise ( han_log_flush_rise ),
+    .fall ()
+);
+
+// byte counter CDC for the 0184 length field
+wire [11:0] han_log_len_s;
+synch_3 #(.WIDTH(12)) han_log_len_sync (
+    .i   ( han_log_len ),
+    .o   ( han_log_len_s ),
+    .clk ( clk_74a )
+);
+
+// 0184 data-slot write FSM (clk_74a)
+localparam LOG_IDLE     = 3'd0;
+localparam LOG_SETTLE   = 3'd1;
+localparam LOG_ISSUE    = 3'd2;
+localparam LOG_WAITACK  = 3'd3;
+localparam LOG_WAITDONE = 3'd4;
+
+reg [2:0]  log_fsm_state;
+reg [3:0]  log_settle_cnt;
+reg [11:0] log_len_cap;
+reg        log_busy, log_ok, log_err;
+
+always @(posedge clk_74a) begin
+    target_dataslot_write <= 1'b0;
+    if (~pll_core_locked_s) begin
+        log_fsm_state  <= LOG_IDLE;
+        log_settle_cnt <= 4'd0;
+        log_len_cap    <= 12'd0;
+        log_busy       <= 1'b0;
+        log_ok         <= 1'b0;
+        log_err        <= 1'b0;
+    end else begin
+        case (log_fsm_state)
+        LOG_IDLE: begin
+            if (han_log_flush_rise && ~log_busy) begin
+                log_busy       <= 1'b1;
+                log_ok         <= 1'b0;
+                log_err        <= 1'b0;
+                log_settle_cnt <= 4'd0;
+                log_fsm_state  <= LOG_SETTLE;
+            end
+        end
+        LOG_SETTLE: begin
+            log_settle_cnt <= log_settle_cnt + 1'b1;
+            if (log_settle_cnt == 4'd10) begin
+                log_len_cap   <= han_log_len_s;
+                log_fsm_state <= LOG_ISSUE;
+            end
+        end
+        LOG_ISSUE: begin
+            if (log_len_cap == 12'd0) begin
+                // nothing captured: report OK without touching the SD card
+                log_ok        <= 1'b1;
+                log_busy      <= 1'b0;
+                log_fsm_state <= LOG_IDLE;
+            end else begin
+                target_dataslot_id         <= 16'd11;          // "Log" data slot
+                target_dataslot_slotoffset <= 32'd0;
+                target_dataslot_bridgeaddr <= 32'h60000000;    // log BRAM bridge view
+                target_dataslot_length     <= 32'd4 * (log_len_cap[11:2] + ((|log_len_cap[1:0]) ? 12'd1 : 12'd0));
+                target_dataslot_write      <= 1'b1;
+                log_fsm_state              <= LOG_WAITACK;
+            end
+        end
+        LOG_WAITACK: begin
+            if (target_dataslot_ack)
+                log_fsm_state <= LOG_WAITDONE;
+        end
+        LOG_WAITDONE: begin
+            if (target_dataslot_done) begin
+                log_ok        <= (target_dataslot_err == 3'd0);
+                log_err       <= (target_dataslot_err != 3'd0);
+                log_busy      <= 1'b0;
+                log_fsm_state <= LOG_IDLE;
+            end
+        end
+        default: log_fsm_state <= LOG_IDLE;
+        endcase
+    end
+end
+
+// status back to the GBA side (clk_74a -> clk_sys)
+wire log_busy_s, log_ok_s, log_err_s;
+synch_3 log_busy_sync(log_busy, log_busy_s, clk_sys);
+synch_3 log_ok_sync  (log_ok,   log_ok_s,   clk_sys);
+synch_3 log_err_sync (log_err,  log_err_s,  clk_sys);
+assign han_log_status = {log_err_s, log_ok_s, log_busy_s};
+
 wire [31:0] ss_bridge_rd_data;
 
 always @(*) begin
@@ -1538,6 +1690,9 @@ always @(*) begin
     end
     32'h4xxxxxxx: begin
         bridge_rd_data <= ss_bridge_rd_data;
+    end
+    32'h6000xxxx: begin
+        bridge_rd_data <= han_log_ram_rd_q;
     end
     32'hF8xxxxxx: begin
         bridge_rd_data <= cmd_bridge_rd_data;
@@ -1912,6 +2067,15 @@ gba_top #(
     .EEPROM_ext_done_in  ( gba_eeprom_done_w ),
     .WAITCNT_phi_out     ( gba_phi_sel ),
     .DIAG_cart_rom_out   ( diag_cart_rom ),
+    // HAN SD log (0x400030C data / 0x400030E ctrl) - dedicated BRAM,
+    // never the .sav slot, never the physical cartridge save area
+    .LOG_wr_en        ( han_log_wr_en ),
+    .LOG_wr_addr      ( han_log_wr_addr ),
+    .LOG_wr_data      ( han_log_wr_data ),
+    .LOG_len          ( han_log_len ),
+    .LOG_flush_req    ( han_log_flush_req ),
+    .LOG_clear_req    ( han_log_clear_req ),
+    .LOG_status_in    ( han_log_status ),
     .save_cart_mode      ( han_save_cart_mode ),
     // SDRAM (ROM reads — muxed with staging in sdram_pocket section)
     .sdram_read_ena      ( sdram_read_req_gba ),

@@ -66,6 +66,17 @@ entity gba_top is
       -- ROM reads to the physical cartridge (used to verify the cart bus /
       -- address decode independently of GPIO)
       DIAG_cart_rom_out     : out    std_logic := '0';
+      -- HAN: SD diagnostic log (0x400030C data / 0x400030E ctrl). The byte
+      -- stream is captured in a dedicated BRAM inside core_top and flushed
+      -- to <rom>.log on the SD card via APF target command 0184. This path
+      -- never touches the .sav slot or the physical cartridge save area.
+      LOG_wr_en             : out    std_logic := '0';
+      LOG_wr_addr           : out    std_logic_vector(11 downto 0) := (others => '0');
+      LOG_wr_data           : out    std_logic_vector(7 downto 0) := (others => '0');
+      LOG_len               : out    std_logic_vector(11 downto 0) := (others => '0');
+      LOG_flush_req         : out    std_logic := '0';
+      LOG_clear_req         : out    std_logic := '0';
+      LOG_status_in         : in     std_logic_vector(2 downto 0) := (others => '0');
       -- HAN: 迂回汉化 - save 写访问透传实体卡带（SRAM/Flash 命令不过内部模拟）
       save_cart_mode        : in     std_logic := '0';
       savestate_number      : in     integer;
@@ -346,6 +357,13 @@ architecture arch of gba_top is
    signal gpio_write_req_seen : std_logic := '0';
    signal gpio_read_req_seen  : std_logic := '0';
    signal REG_GPIO_TMODE    : std_logic_vector(2 downto 0) := "000";
+   -- HAN: SD log capture state
+   signal LOG_DATA_REG     : std_logic_vector(7 downto 0) := (others => '0');
+   signal LOG_DATA_WRITTEN : std_logic := '0';
+   signal LOG_CTRL_REG     : std_logic_vector(15 downto 0) := (others => '0');
+   signal LOG_CTRL_WRITTEN : std_logic := '0';
+   signal LOG_STATUS_DIN   : std_logic_vector(15 downto 0) := (others => '0');
+   signal LOG_cnt          : std_logic_vector(11 downto 0) := (others => '0');
    signal REG_IME     : std_logic_vector(work.pReg_gba_system.IME    .upper downto work.pReg_gba_system.IME    .lower) := (others => '0');                                                                                                   
    signal REG_POSTFLG : std_logic_vector(work.pReg_gba_system.POSTFLG.upper downto work.pReg_gba_system.POSTFLG.lower) := (others => '0');
    signal REG_HALTCNT : std_logic_vector(work.pReg_gba_system.HALTCNT.upper downto work.pReg_gba_system.HALTCNT.lower) := (others => '0');
@@ -990,6 +1008,53 @@ begin
       generic map ((16#30A#, 2, 0, 0, 0, readwrite))
       port map (clk100, gb_bus, (REG_GPIO_TMODE'range => '0'), REG_GPIO_TMODE);
    GPIO_timing_mode_out <= REG_GPIO_TMODE;
+
+   -- HAN: SD log write port (0x400030C, readwrite so the CPU write cycle
+   -- completes). Each CPU write appends the low byte to the 4KB log buffer
+   -- that lives in core_top (clk_sys write port, clk_74a read port).
+   LOG_STATUS_DIN(2 downto 0) <= LOG_status_in;
+   LOG_STATUS_DIN(3)          <= '0';
+   LOG_STATUS_DIN(15 downto 4) <= LOG_cnt;
+   iREG_LOG_DATA : entity work.eProcReg_gba
+      generic map ((16#30C#, 7, 0, 0, 0, readwrite))
+      port map (clk100, gb_bus, (others => '0'), LOG_DATA_REG, LOG_DATA_WRITTEN);
+   -- HAN: log control/status (0x400030E). Write bit0 = flush to SD, bit1 =
+   -- clear buffer. Read: bit0 = busy, bit1 = ok, bit2 = err, bits15..4 =
+   -- current byte count captured so far.
+   iREG_LOG_CTRL : entity work.eProcReg_gba
+      generic map ((16#30E#, 15, 0, 0, 0, readwrite))
+      port map (clk100, gb_bus, LOG_STATUS_DIN, LOG_CTRL_REG, LOG_CTRL_WRITTEN);
+
+   process (clk100)
+   begin
+      if rising_edge(clk100) then
+         LOG_wr_en     <= '0';
+         LOG_flush_req <= '0';
+         LOG_clear_req <= '0';
+         if reset = '1' then
+            LOG_cnt <= (others => '0');
+         else
+            if LOG_DATA_WRITTEN = '1' then
+               if unsigned(LOG_cnt) < 4096 then
+                  LOG_wr_en   <= '1';
+                  LOG_wr_addr <= LOG_cnt;
+                  LOG_wr_data <= LOG_DATA_REG;
+                  LOG_cnt     <= std_logic_vector(unsigned(LOG_cnt) + 1);
+               end if;
+            end if;
+            if LOG_CTRL_WRITTEN = '1' then
+               if LOG_CTRL_REG(0) = '1' then
+                  LOG_flush_req <= '1';
+               end if;
+               if LOG_CTRL_REG(1) = '1' then
+                  LOG_clear_req <= '1';
+                  LOG_cnt       <= (others => '0');
+               end if;
+            end if;
+         end if;
+      end if;
+   end process;
+   LOG_len <= LOG_cnt;
 
    process (clk100)
    begin
