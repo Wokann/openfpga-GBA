@@ -1039,7 +1039,11 @@ begin
                   LOG_wr_en   <= '1';
                   LOG_wr_addr <= LOG_cnt;
                   LOG_wr_data <= LOG_DATA_REG;
-                  LOG_cnt     <= std_logic_vector(unsigned(LOG_cnt) + 1);
+                  -- 12-bit counter must not wrap: hold at 4095 after the
+                  -- last byte so the 4KB buffer can't be overwritten.
+                  if unsigned(LOG_cnt) /= 4095 then
+                     LOG_cnt <= std_logic_vector(unsigned(LOG_cnt) + 1);
+                  end if;
                end if;
             end if;
             if LOG_CTRL_WRITTEN = '1' then
