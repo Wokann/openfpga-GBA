@@ -1596,18 +1596,7 @@ always @(posedge clk_74a) begin
                          han_log_ram0[bridge_addr[11:2]]};
 end
 
-// flush request CDC (clk_sys pulse -> clk_74a rising edge)
-wire han_log_flush_s;
-wire han_log_flush_rise;
-synch_3 han_log_flush_sync (
-    .i    ( han_log_flush_req ),
-    .o    ( han_log_flush_s ),
-    .clk  ( clk_74a ),
-    .rise ( han_log_flush_rise ),
-    .fall ()
-);
-
-// byte counter CDC for the 0184 length field
+// byte counter CDC to clk_74a (used for the Log-slot writeback size)
 wire [11:0] han_log_len_s;
 synch_3 #(.WIDTH(12)) han_log_len_sync (
     .i   ( han_log_len ),
@@ -1615,83 +1604,9 @@ synch_3 #(.WIDTH(12)) han_log_len_sync (
     .clk ( clk_74a )
 );
 
-// 0184 data-slot write FSM (clk_74a)
-localparam LOG_IDLE     = 3'd0;
-localparam LOG_SETTLE   = 3'd1;
-localparam LOG_ISSUE    = 3'd2;
-localparam LOG_WAITACK  = 3'd3;
-localparam LOG_WAITDONE = 3'd4;
-
-reg [2:0]  log_fsm_state;
-reg [3:0]  log_settle_cnt;
-reg [11:0] log_len_cap;
-reg        log_busy, log_ok, log_err;
-
-always @(posedge clk_74a) begin
-    target_dataslot_write <= 1'b0;
-    if (~pll_core_locked_s) begin
-        log_fsm_state  <= LOG_IDLE;
-        log_settle_cnt <= 4'd0;
-        log_len_cap    <= 12'd0;
-        log_busy       <= 1'b0;
-        log_ok         <= 1'b0;
-        log_err        <= 1'b0;
-    end else begin
-        case (log_fsm_state)
-        LOG_IDLE: begin
-            if (han_log_flush_rise && ~log_busy) begin
-                log_busy       <= 1'b1;
-                log_ok         <= 1'b0;
-                log_err        <= 1'b0;
-                log_settle_cnt <= 4'd0;
-                log_fsm_state  <= LOG_SETTLE;
-            end
-        end
-        LOG_SETTLE: begin
-            log_settle_cnt <= log_settle_cnt + 1'b1;
-            if (log_settle_cnt == 4'd10) begin
-                log_len_cap   <= han_log_len_s;
-                log_fsm_state <= LOG_ISSUE;
-            end
-        end
-        LOG_ISSUE: begin
-            if (log_len_cap == 12'd0) begin
-                // nothing captured: report OK without touching the SD card
-                log_ok        <= 1'b1;
-                log_busy      <= 1'b0;
-                log_fsm_state <= LOG_IDLE;
-            end else begin
-                target_dataslot_id         <= 16'd11;          // "Log" data slot
-                target_dataslot_slotoffset <= 32'd0;
-                target_dataslot_bridgeaddr <= 32'h60000000;    // log BRAM bridge view
-                target_dataslot_length     <= 32'd4 * (log_len_cap[11:2] + ((|log_len_cap[1:0]) ? 12'd1 : 12'd0));
-                target_dataslot_write      <= 1'b1;
-                log_fsm_state              <= LOG_WAITACK;
-            end
-        end
-        LOG_WAITACK: begin
-            if (target_dataslot_ack)
-                log_fsm_state <= LOG_WAITDONE;
-        end
-        LOG_WAITDONE: begin
-            if (target_dataslot_done) begin
-                log_ok        <= (target_dataslot_err == 3'd0);
-                log_err       <= (target_dataslot_err != 3'd0);
-                log_busy      <= 1'b0;
-                log_fsm_state <= LOG_IDLE;
-            end
-        end
-        default: log_fsm_state <= LOG_IDLE;
-        endcase
-    end
-end
-
-// status back to the GBA side (clk_74a -> clk_sys)
-wire log_busy_s, log_ok_s, log_err_s;
-synch_3 log_busy_sync(log_busy, log_busy_s, clk_sys);
-synch_3 log_ok_sync  (log_ok,   log_ok_s,   clk_sys);
-synch_3 log_err_sync (log_err,  log_err_s,  clk_sys);
-assign han_log_status = {log_err_s, log_ok_s, log_busy_s};
+// Status to the GBA side: writes happen on core exit via the datatable
+// size (Pocket OS writes <rom>.log), so busy/ok/err stay 0 here.
+assign han_log_status = 3'd0;
 
 wire [31:0] ss_bridge_rd_data;
 
@@ -1763,14 +1678,26 @@ wire [31:0] save_size_bytes = han_save_cart_mode ? 32'd0 :
 // Continuous writes ensure the core's value is always current when the OS reads
 // it on core exit for save writeback. This is just a BRAM write port — no cost.
 // Matches the pattern used by the GBC reference core (budude2/openfpga-GBC).
+reg datatable_toggle;
 always @(posedge clk_74a) begin
     if (~pll_core_locked_s) begin
         datatable_addr_r <= 10'd0;
         datatable_data_r <= 32'd0;
         datatable_wren_r <= 1'b0;
+        datatable_toggle <= 1'b0;
     end else begin
-        datatable_addr_r <= 10'd5;          // save slot index 2: 2*2+1 = 5
-        datatable_data_r <= save_size_bytes;
+        datatable_toggle <= ~datatable_toggle;
+        if (datatable_toggle) begin
+            datatable_addr_r <= 10'd5;          // save slot index 2: 2*2+1 = 5
+            datatable_data_r <= save_size_bytes;
+        end else begin
+            // Log slot index 3: 2*3+1 = 7. Byte count captured via
+            // 0x400030C; the Pocket OS writes <rom>.log on core exit.
+            // Normal games never write the log port, so this stays 0 and
+            // no .log file is created. Independent of the .sav slot.
+            datatable_addr_r <= 10'd7;
+            datatable_data_r <= {20'd0, han_log_len_s};
+        end
         datatable_wren_r <= 1'b1;
     end
 end

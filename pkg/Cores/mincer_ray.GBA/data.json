@@ -36,7 +36,6 @@
         "id": 11,
         "required": false,
         "parameters": "0x4",
-        "deferload": true,
         "nonvolatile": true,
         "extensions": ["log"],
         "address": "0x60000000",
