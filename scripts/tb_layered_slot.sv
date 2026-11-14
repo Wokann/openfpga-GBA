@@ -1,8 +1,10 @@
 `timescale 1ns/1ps
 module tb_layered_slot;
     reg clk=0, clk74=0, reset_n=0, restart=0, cfg=1, hw_cfg=0, motor=0;
+    reg tilt_game=0,phi_source=0;
     always #5 clk=~clk;
     always #6.734 clk74=~clk74;
+    always #120 phi_source=~phi_source;
     tri [7:0] b1,b2,b3;
     tri [7:4] b0;
     tri pin30, pin31;
@@ -18,6 +20,7 @@ module tb_layered_slot;
         .clk_sys(clk), .clk_74a(clk74), .pll_core_locked(reset_n),
         .core_reset_s(restart), .reset_n_s(1'b1), .dataslot_allcomplete_s(1'b1),
         .cfg(cfg), .hw_cfg(hw_cfg), .motor(motor), .save_req(save_req), .save_rnw(save_rnw),
+        .tilt_game(tilt_game), .phi_source(phi_source),
         .save_addr(save_addr), .save_din(save_din),
         .e_req(e_req), .e_rnw(e_rnw), .e_din(e_din), .e_dma(e_dma),
         .g_req(g_req), .g_rnw(g_rnw), .g_addr(g_addr), .g_din(g_din),
@@ -120,6 +123,8 @@ module tb_layered_slot;
     end
     // A grant must never cut a rumble/save strobe in half.
     reg previous_owner=0;
+    always @(negedge clk) if(reset_n && b0[7] !== dut.cart_phi)
+        $fatal(1,"PHI interrupted by bus ownership");
     always @(posedge clk74) begin
         if(dut.cart_slot_owner!==previous_owner && reset_n) begin
             if(cs!==1'b1 || rd!==1'b1 || wr!==1'b1)
@@ -255,6 +260,22 @@ module tb_layered_slot;
         if(dut.layered_save_mode || !dut.cart_hw_mode) $fatal(1,"SD saves/GPIO selection coupled");
         gpio_access(0,2,1,0);gpio_access(0,1,15,0);gpio_access(0,0,9,0);
         gpio_access(1,0,0,9);
+        // Physical sensor bytes work with SD saves. Other save bytes must
+        // never reach the cartridge, including adjacent SRAM addresses.
+        tilt_game=1;
+        save_access(0,'h8000,'h55,0);save_access(0,'h8100,'hAA,0);
+        ram['h8200]=8'h42;
+        save_access(1,'h8200,0,'h42);
+        before_saves=save_writes;
+        @(negedge clk);save_addr='h8201;save_req=1;save_rnw=0;save_din='h5A;
+        @(negedge clk);save_req=0;
+        repeat(200) @(negedge clk);
+        if(save_writes!=before_saves) $fatal(1,"SD SRAM byte redirected into sensor bus");
+        tilt_game=0;
+        @(negedge clk);save_addr='h8000;save_req=1;
+        @(negedge clk);save_req=0;
+        repeat(200) @(negedge clk);
+        if(save_writes!=before_saves) $fatal(1,"ordinary SRAM game treated as tilt game");
         hw_cfg=0;repeat(5) @(negedge clk);
         if(dut.layered_save_mode) $fatal(1,"disabled mode not restored");
         @(negedge clk); restart=1;

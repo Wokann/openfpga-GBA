@@ -879,6 +879,7 @@ set_global_assignment -name VHDL_FILE ../gba/reggba_sound.vhd
 set_global_assignment -name VHDL_FILE ../gba/reggba_system.vhd
 set_global_assignment -name VHDL_FILE ../gba/reggba_timer.vhd
 set_global_assignment -name VHDL_FILE ../gba/gba_top.vhd
+set_global_assignment -name VHDL_FILE ../gba/gba_cart_io.vhd
 set_global_assignment -name VHDL_FILE ../gba/gba_memorymux.vhd
 set_global_assignment -name VHDL_FILE ../gba/gba_bios.vhd
 set_global_assignment -name VHDL_FILE ../gba/gba_cpu.vhd

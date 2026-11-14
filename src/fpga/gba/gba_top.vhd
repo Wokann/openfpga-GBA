@@ -58,6 +58,9 @@ entity gba_top is
       GPIO_ext_readable    : in     std_logic := '0';
       save_cart_mode        : in     std_logic := '0';
       gpio_cart_mode        : in     std_logic := '0';
+      tilt_cart_mode        : in     std_logic := '0';
+      Cart_IRQ_in           : in     std_logic := '0';
+      Cart_PHI_out          : out    std_logic;
       savestate_number      : in     integer;
       -- RTC
       RTC_timestampNew      : in     std_logic;                     -- new current timestamp from system
@@ -338,7 +341,7 @@ architecture arch of gba_top is
    signal IRP_Serial  : std_logic;
    signal IRP_Joypad  : std_logic;
    signal serial_abort_link : std_logic;
-   -- signal IRP_Gamepak : std_logic; -- not implemented
+   signal IRP_Gamepak : std_logic;
    
    signal cycles_ahead    : integer range 0 to 131071 := 0;
    signal cycles_16_100   : integer range 0 to (SPEEDDIV - 1) := 0;
@@ -514,6 +517,14 @@ begin
    
    RTC_local_saveLoaded <= RTC_saveLoaded and not gpio_cart_mode;
 
+   igba_cart_io : entity work.gba_cart_io
+   generic map (SPEEDDIV => SPEEDDIV)
+   port map (
+      clk => clk100, reset => reset, enable => gpio_cart_mode,
+      phi_select => REG_WAITCNT(12 downto 11), irq_pin => Cart_IRQ_in,
+      phi_pin => Cart_PHI_out, irq_pulse => IRP_Gamepak
+   );
+
    igba_gpioRTCSolarGyro : entity work.gba_gpioRTCSolarGyro
    port map
    (
@@ -671,6 +682,7 @@ begin
       EEPROM_ext_done      => EEPROM_ext_done_in,
       save_cart_mode       => save_cart_mode,
       gpio_cart_mode       => gpio_cart_mode,
+      tilt_cart_mode       => tilt_cart_mode,
       GPIO_ext_req         => GPIO_ext_req,
       GPIO_ext_addr        => GPIO_ext_addr,
       GPIO_ext_rnw         => GPIO_ext_rnw,
@@ -971,7 +983,7 @@ begin
             if (IRP_DMA(2) = '1')   then IRPFLags(10) <= '1'; end if;
             if (IRP_DMA(3) = '1')   then IRPFLags(11) <= '1'; end if;
             if (IRP_Joypad = '1')   then IRPFLags(12) <= '1'; end if;
-            --if (IRP_Gamepak = '1')  then IRPFLags(13) <= '1'; end if; -- not implemented
+            -- Physical cartridge IRQ is latched below, including while paused.
             
             cpu_IRP <= '0';
             if ((IRPFLags and REG_IRP_IE) /= x"0000" and REG_IME(0) = '1') then
@@ -985,6 +997,12 @@ begin
                end if;
             end if;
             
+         end if;
+
+         -- External RTC keeps running while the core is paused. Keep IF13
+         -- pending until software acknowledges it; a new edge wins over W1C.
+         if (reset = '0' and IRP_Gamepak = '1') then
+            IRPFLags(13) <= '1';
          end if;
 
       end if;

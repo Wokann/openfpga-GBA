@@ -1,4 +1,4 @@
-# Layered：SD ROM 与实体卡带存档、GPIO
+# Layered：SD ROM 与实体卡带存档、外设
 
 本分支以 mincer-ray/openfpga-GBA **v1.0.1 / a61eaf2** 为基线，将旧版
 `f245435` 中已经调试过的存档通路和卡带 ROM 头探测筛选后合并为一个提交。
@@ -65,11 +65,29 @@ EEPROM 连续会话保留原有独占与超时机制。
 | 卡带存档 | 外设透传偏好 | 检测到卡带时的行为 |
 |---|---|---|
 | 关闭 | 关闭 | SD 存档＋上游 GPIO/RTC 与震动驱动 |
-| 关闭 | 开启 | SD 存档＋实体 GPIO |
-| 开启 | 任意 | 实体存档＋实体 GPIO |
+| 关闭 | 开启 | SD 存档＋实体 GPIO、倾斜传感器、PHI 与 IRQ |
+| 开启 | 任意 | 实体存档＋实体 GPIO、倾斜传感器、PHI 与 IRQ |
 
 空槽或探测失败均回退上游。关闭“外设透传”是恢复基线，因此基线原有的
 实体震动驱动仍可运行；它不是所有震动的总开关。
+
+实体外设模式同时接通以下非 GPIO 通路：
+
+- **倾斜传感器**：复用上游对所运行 SD ROM 的 `KYG/KHP` 倾斜游戏标记，将
+  `0x0E008000/8100/8200/8300/8400/8500` 六个字节寄存器送到卡带。这里的
+  标记只用于区分地址含义，不识别所插卡带是否真的具有传感器。其他 SRAM
+  游戏的同地址仍按存档处理，倾斜游戏的 EEPROM 也继续按独立存档开关分流。
+  传感器写入不触发 SRAM 存档脏标记。
+- **PHI**：跟随游戏 `WAITCNT[12:11]`，提供关闭、GBA 时钟 /4、/2、/1
+  （约 4.19/8.39/16.78 MHz）。由一个持续的引脚驱动器输出，总线交接、
+  GPIO 或存档事务不会切断 PHI；复位或退出实体外设模式时关闭。
+- **卡槽 IRQ**：读取 pin31，经三级同步后捕获上升沿，接入真实 `IF[13]`
+  和上游 IE/IME 中断通路。软件写一清除，不因引脚持续为高反复触发；核心
+  暂停时也保留请求。刚进入模式时先同步初始电平，避免伪造一次中断。
+
+不模拟 RTC 的闹钟或周期中断算法，只接收实体卡带给出的电平变化。RTC
+引脚经过卡带 ROM 芯片反相后到达卡槽，因此不再额外反相；具体哪些商业游戏
+使用其 IRQ、各卡带的时序与电气表现，仍需要真机确认。
 切换存档来源不会在 SD 与卡带之间复制存档；要更换 SD 游戏，应重新加载 ROM。
 
 卡带存档启用后，游戏内的 SRAM/Flash/EEPROM 访问只走实体卡带，并向 Pocket
@@ -84,8 +102,10 @@ EEPROM 连续会话保留原有独占与超时机制。
 
 ## 源码组织
 
-新增硬件模块与上游的存档／RTC 模块同放在 `src/fpga/core/`；回归脚本和测试
+卡带总线和探测模块与上游的存档／RTC 模块同放在 `src/fpga/core/`；回归脚本和测试
 文件同放在已有的 `scripts/`，不建立新的功能目录。
+PHI/IRQ 的小型 VHDL 模块 `gba_cart_io` 放在已有 `src/fpga/gba/`，与
+`gba_top` 的 WAITCNT 和中断控制直接连接。
 
 接入位置按 v1.0.1 的现有数据流选择：
 
@@ -120,10 +140,15 @@ Flash bank 1、EEPROM DMA／CPU、ROM 头匹配／异常／超时测试继续保
 非对齐旋转、ROM 等待区映射、C8/CA 混合读取的缓存命中与缺失、C8 关闭后的 SD
 ROM 返回，以及回退分流。分支 CI 在 Quartus 构建前运行同一回归。
 
-行为模型通过不等于 Pocket 真机验收；实体 RTC、太阳能、陀螺仪、震动组合仍需
-上机测试。这里的完整 GPIO 指三寄存器、四根 GPIO 线的透传，不包含额外的
-卡槽 IRQ/PHI 实现；使用 SRAM 映射与 PHI 的 Yoshi 倾斜传感器不能据此宣称支持。
-实体外设状态也不能随 FPGA 即时存档倒退恢复。
+非 GPIO 回归覆盖六个传感器地址与相邻普通存档地址的隔离、SD EEPROM
+不被传感器模式改成实体存档、PHI 连续性与四档输出。IRQ 测试直接提取
+生产 `gba_top` 的中断过程，检查暂停捕获、IE/IME 屏蔽、IF 写一清除、同周期
+新事件优先，以及关闭/重新启用时不产生伪中断。生产 memorymux 和 cart_io
+还检查 VHDL-2002 兼容性。
+
+行为模型通过不等于 Pocket 真机验收；实体 RTC、太阳能、陀螺仪、震动组合，
+以及新增的倾斜传感器、PHI、IRQ 通路仍需上机测试。本次不实现卡槽 /DREQ
+触发的特殊 DMA 协议。实体外设状态也不能随 FPGA 即时存档倒退恢复。
 
 ## 参考
 
@@ -132,4 +157,6 @@ ROM 返回，以及回退分流。分支 CI 在 Quartus 构建前运行同一回
 - [上游 GPIO 读取使能变更](https://github.com/mincer-ray/openfpga-GBA/commit/db4132854768463a4e052659195991cfc5f143d4)
 - [GBATEK GPIO 寄存器及外设接线](https://problemkaputt.de/gbatek.htm#gbacartioportgpio)
 - [上游实体 GPIO 震动写入波形](https://github.com/mincer-ray/openfpga-GBA/commit/ab4132ee8d81fcda3b79196fcefea6c50f7c42b7)
+- [GBATEK 倾斜传感器寄存器与 PHI](https://problemkaputt.de/gbatek.htm#gbacarttiltsensor)
+- [ares 的卡带 RTC 中断边沿实现](https://github.com/ares-emulator/ares/blob/master/ares/gba/cartridge/rtc.cpp)
 - 旧版卡带总线控制器和实测记录保留在备份分支；本次不逐条重放其提交。

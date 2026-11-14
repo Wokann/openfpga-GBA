@@ -11,6 +11,8 @@ architecture test of tb_layered_memorymux is
     signal gb_on : std_logic := '0';
     signal cart_mode : std_logic := '1';
     signal hw_mode : std_logic := '1';
+    signal tilt_mode, save_sram : std_logic := '0';
+    signal sram_events : natural := 0;
     signal ss : proc_bus_gb_type := ((others=>'0'), (others=>'Z'), (others=>'0'), '1', '0', 'Z', "10", "1111", '1');
     signal adr, wdata, rdata : std_logic_vector(31 downto 0) := (others=>'0');
     signal ena, rnw, done : std_logic := '0';
@@ -47,7 +49,7 @@ begin
         mem_bus_Adr=>adr, mem_bus_rnw=>rnw, mem_bus_ena=>ena, mem_bus_acc=>acc,
         mem_bus_dout=>wdata, mem_bus_din=>rdata, mem_bus_done=>done, mem_bus_unread=>open,
         bus_lowbits=>"00", dma_soon=>'0', settle=>open,
-        save_eeprom=>open, save_sram=>open, save_flash=>open,
+        save_eeprom=>open, save_sram=>save_sram, save_flash=>open,
         new_cycles=>(others=>'0'), new_cycles_valid=>'0', PC_in_BIOS=>'0',
         lastread=>(others=>'0'), lastread_dma=>(others=>'0'), last_access_dma=>dma,
         dma_eepromcount=>ee_count, flash_1m=>'1', MaxPakAddr=>(others=>'1'),
@@ -64,7 +66,8 @@ begin
         GPIO_ext_din=>g_din, GPIO_ext_dout=>g_dout, GPIO_ext_done=>g_done, GPIO_ext_readable=>g_readable,
         EEPROM_ext_req=>ee_req, EEPROM_ext_rnw=>ee_rnw,
         EEPROM_ext_din=>ee_din, EEPROM_ext_dma=>ee_dma, EEPROM_ext_dout=>'1', EEPROM_ext_done=>ee_done,
-        save_cart_mode=>cart_mode, gpio_cart_mode=>hw_mode, tilt=>'0', AnalogTiltX=>(others=>'0'), AnalogTiltY=>(others=>'0'), debug_mem=>open
+        save_cart_mode=>cart_mode, gpio_cart_mode=>hw_mode, tilt_cart_mode=>tilt_mode,
+        tilt=>'0', AnalogTiltX=>(others=>'0'), AnalogTiltY=>(others=>'0'), debug_mem=>open
     );
     process(clk)
         variable bus_delay, ee_delay, rom_delay, g_delay : natural := 0;
@@ -74,6 +77,7 @@ begin
     begin
         if rising_edge(clk) then
             bus_done<='0'; ee_done<='0'; sdram_done<='0';g_done<='0';
+            if save_sram='1' then sram_events<=sram_events+1; end if;
             if gpio_req='1' then local_reads<=local_reads+1; end if;
             if gpio_write='1' then local_writes<=local_writes+1; end if;
             if g_req='1' then
@@ -202,6 +206,20 @@ begin
         access_bus(16#080000C8#,'0',1,ACCESS_16BIT);
         access_bus(16#080000C6#,'1',0,ACCESS_16BIT);
         assert rdata=x"00000007" and local_reads=0 report "SD saves disabled raw GPIO" severity failure;
+        tilt_mode<='1';n:=bus_requests;r:=sram_events;e:=ee_requests;
+        access_bus(16#0E008000#,'0',16#55#,ACCESS_8BIT);
+        assert last_address=x"8000" and last_write=x"55" severity failure;
+        access_bus(16#0E008100#,'0',16#AA#,ACCESS_8BIT);
+        assert last_address=x"8100" and last_write=x"AA" severity failure;
+        for i in 0 to 3 loop
+            access_bus(16#0E008200#+i*256,'1',0,ACCESS_8BIT);
+            assert bus_addr(15 downto 0)=std_logic_vector(to_unsigned(16#8200#+i*256,16)) and rdata=x"0000005A"
+                report "tilt register did not use physical byte bus" severity failure;
+        end loop;
+        assert bus_requests=n+6 and sram_events=r report "sensor accesses marked SRAM dirty" severity failure;
+        access_bus(16#0DFFFF00#,'1',0,ACCESS_16BIT);
+        assert ee_requests=e and rdata(0)='1' report "physical sensor forced physical EEPROM" severity failure;
+        tilt_mode<='0';
         hw_mode<='0';
         e:=g_requests;
         access_bus(16#080000C4#,'1',0,ACCESS_16BIT);

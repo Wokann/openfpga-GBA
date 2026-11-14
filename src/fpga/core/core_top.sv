@@ -238,6 +238,12 @@ wire cart_probe_enable = layered_cfg_s || cart_hw_cfg_s;
 wire cart_probe_done, cart_detect;
 wire layered_save_mode = layered_cfg_s && cart_detect && cart_probe_done;
 wire cart_hw_mode = cart_probe_enable && cart_detect && cart_probe_done;
+wire cart_phi;
+// Yoshi/Koro sensor registers share the byte bus but are not save storage.
+// Decode only the six sensor addresses of a tilt game, never its EEPROM
+// data or an ordinary SRAM game's bytes at these same offsets.
+wire cart_byte_access = layered_save_mode || (cart_hw_mode && quirk_tilt &&
+    bus_out_Adr[16:8] >= 9'h080 && bus_out_Adr[16:8] <= 9'h085 && bus_out_Adr[7:0] == 0);
 wire cart_probe_req, cart_probe_ready, cart_bus_ready;
 wire [1:0] cart_probe_addr;
 wire [31:0] cart_probe_data;
@@ -427,8 +433,9 @@ assign cart_tran_bank2     = cart_slot_owner ? 8'hzz : rumble_ad[15:8];
 assign cart_tran_bank2_dir = cart_slot_owner ? cart_bank2_dir : 1'b1;
 assign cart_tran_bank1     = cart_slot_owner ? 8'hzz : 8'h00;                 // A[23:16] = 0 (80000xxh)
 assign cart_tran_bank1_dir = cart_slot_owner ? cart_bank1_dir : 1'b1;
-// bank0[7]=PHI=0, [6]=/WR, [5]=/RD=1, [4]=/CS
-assign cart_tran_bank0     = cart_slot_owner ? 4'bzzzz : {1'b0, rumble_wr_n, 1'b1, rumble_cs_n};
+// PHI has one continuous driver, independent of shared bus ownership.
+assign cart_tran_bank0[7]   = cart_phi;
+assign cart_tran_bank0[6:4] = cart_slot_owner ? 3'bzzz : {rumble_wr_n, 1'b1, rumble_cs_n};
 assign cart_tran_bank0_dir = 1'b1;
 assign cart_tran_pin30 = cart_slot_owner ? 1'bz : 1'b0;                      // /CS2: left to Pocket hardware (template default)
 assign cart_tran_pin30_dir = cart_slot_owner ? 1'b1 : 1'bz;
@@ -903,7 +910,7 @@ always @(posedge clk_sys) begin
                         sdram_ch2_be  <= bus_out_be;
                     end
                     bus_state <= BUS_EWRAM_WAIT;
-                end else if (layered_save_mode) begin
+                end else if (cart_byte_access) begin
                     cart_save_req <= 1'b1;
                     cart_save_addr <= bus_out_Adr[15:0];
                     cart_save_rnw <= bus_out_rnw;
@@ -1125,6 +1132,7 @@ save_type_detector save_det (
 // Quirk outputs feed gba_top ports in Step 5.5.
 wire        quirk_sram;
 wire        quirk_gpio;       // → specialmodule
+wire        quirk_tilt;
 wire        quirk_rtc;
 wire        quirk_memory_remap; // → memory_remap
 wire        quirk_sprite;     // → maxpixels
@@ -1136,7 +1144,7 @@ cart_quirks quirks (
     .sram_quirk    ( quirk_sram ),
     .gpio_quirk    ( quirk_gpio ),
     .rtc_quirk     ( quirk_rtc ),
-    .tilt_quirk    (),
+    .tilt_quirk    ( quirk_tilt ),
     .solar_quirk   (),
     .memory_remap  ( quirk_memory_remap ),
     .sprite_quirk  ( quirk_sprite )
@@ -1877,6 +1885,9 @@ gba_top #(
     .Rumble              ( cart_rumble ),
     .save_cart_mode      ( layered_save_mode ),
     .gpio_cart_mode      ( cart_hw_mode ),
+    .tilt_cart_mode      ( cart_hw_mode && quirk_tilt ),
+    .Cart_IRQ_in         ( cart_tran_pin31 ),
+    .Cart_PHI_out        ( cart_phi ),
     .GPIO_ext_req        ( cart_gpio_req ),
     .GPIO_ext_addr       ( cart_gpio_addr ),
     .GPIO_ext_rnw        ( cart_gpio_rnw ),

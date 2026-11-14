@@ -644,8 +644,8 @@ module gba_cart_controller #(
     assign cart_tran_bank3     = (bus_enable && out_bank3_dir) ? out_bank3 : 8'hzz;
     assign cart_tran_bank3_dir = out_bank3_dir;
 
-    // PHI is not needed by the migrated save protocols.
-    assign cart_tran_bank0 = bus_enable ? {1'b0, wr_n, rd_n, cs_n} : 4'bzzzz;
+    // PHI is driven continuously by core_top, not by this bus owner.
+    assign cart_tran_bank0[6:4] = bus_enable ? {wr_n, rd_n, cs_n} : 3'bzzz;
 
     // pin30: CS2#/RES# — CS2# active during SRAM/Flash accesses and for one
     // extra cycle in S_DONE (so WR#/RD# rise while CS2# is still low, as real

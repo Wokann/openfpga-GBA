@@ -124,6 +124,7 @@ entity gba_memorymux is
       -- Physical saves bypass Flash/EEPROM emulation.
       save_cart_mode       : in     std_logic := '0';
       gpio_cart_mode       : in     std_logic := '0';
+      tilt_cart_mode       : in     std_logic := '0';
       EEPROM_ext_req       : out    std_logic := '0';
       EEPROM_ext_rnw       : out    std_logic := '0';
       EEPROM_ext_din       : out    std_logic := '0';
@@ -191,6 +192,7 @@ architecture arch of gba_memorymux is
    signal state : tState := IDLE;
    signal gpio_sample : std_logic_vector(31 downto 0);
    signal gpio_cart_addr : std_logic_vector(1 downto 0);
+   signal tilt_cart_access : std_logic;
    
    signal gb_on_1            : std_logic := '0';
    
@@ -294,6 +296,9 @@ architecture arch of gba_memorymux is
 begin
 
    GPIO_ext_addr <= gpio_cart_addr;
+   tilt_cart_access <= '1' when tilt_cart_mode = '1' and
+      unsigned(adr_save(15 downto 8)) >= 16#80# and unsigned(adr_save(15 downto 8)) <= 16#85# and
+      adr_save(7 downto 0) = x"00" else '0';
 
    settle <= '1' when registersettle = '1' or (new_cycles_valid = '1' and dma_soon = '1') else '0';
 
@@ -1376,7 +1381,12 @@ begin
                state       <= rotate;
                rotate_data <= (others => '0');
                
-               if (tilt = '1') then
+               if (tilt_cart_access = '1') then
+                  state <= FLASH_WAITREAD;
+                  bus_out_Adr <= std_logic_vector(to_unsigned(Softmap_GBA_FLASH_ADDR, busadr_bits) + unsigned(adr_save(15 downto 0)));
+                  bus_out_rnw <= '1';
+                  bus_out_ena <= '1';
+               elsif (tilt = '1') then
                
                   if (adr_save = x"E008200") then rotate_data(7 downto 0) <= std_logic_vector(tilt_x( 7 downto 0)); end if;
                   if (adr_save = x"E008300") then rotate_data(3 downto 0) <= std_logic_vector(tilt_x(11 downto 8)); rotate_data(7) <= '1'; end if; -- bit 7 for sampling done
@@ -1423,7 +1433,7 @@ begin
                end if;
             
             when FLASHSRAMWRITEDECIDE1 =>
-               if (save_cart_mode = '1') then
+               if (save_cart_mode = '1' or tilt_cart_access = '1') then
                   -- Forward EVERY byte, including Flash unlock/bank commands.
                   state <= SRAMWRITE;
                else
@@ -1447,7 +1457,7 @@ begin
                bus_out_Adr  <= std_logic_vector(to_unsigned(Softmap_GBA_FLASH_ADDR, busadr_bits) + unsigned(adr_save(15 downto 0)));
                bus_out_rnw  <= '0';
                bus_out_ena  <= '1'; 
-               save_sram    <= '1';
+               save_sram    <= not tilt_cart_access;
                state        <= WAIT_PROCBUS;
             
             when FLASHWRITE =>
