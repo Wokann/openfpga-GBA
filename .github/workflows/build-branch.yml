@@ -16,6 +16,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Install RTL simulators
+        run: sudo apt-get update && sudo apt-get install -y iverilog ghdl
+
+      - name: Test layered saves and shared cartridge slot
+        run: python3 scripts/test_layered.py
+
       - name: Compile
         run: docker run --rm -v ${{ github.workspace }}:/build -w /build raetro/quartus:21.1 quartus_sh -t generate.tcl
 

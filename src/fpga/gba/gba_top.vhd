@@ -41,6 +41,14 @@ entity gba_top is
       specialmodule         : in     std_logic;                    -- 0 = off, 1 = use gamepak GPIO Port at address 0x080000C4..0x080000C8
       Rumble                : out    std_logic := '0';              -- GPIO bit 3 at 0x80000C4 (Drill Dozer / WarioWare Twisted)
       -- solar/tilt/gyro removed to save ALMs (only affects <2% of games)
+      -- HAN: EEPROM bit-serial forwarding to physical cartridge
+      EEPROM_ext_req_out    : out    std_logic := '0';             -- bit access request pulse
+      EEPROM_ext_rnw_out    : out    std_logic := '0';             -- 1 = read bit, 0 = write bit
+      EEPROM_ext_din_out    : out    std_logic := '0';             -- write data bit
+      EEPROM_ext_dma_out    : out    std_logic := '0';             -- 1 = DMA3 burst, 0 = CPU poll
+      EEPROM_ext_dout_in    : in     std_logic := '0';             -- read data bit
+      EEPROM_ext_done_in    : in     std_logic := '0';             -- bit access done
+      save_cart_mode        : in     std_logic := '0';
       savestate_number      : in     integer;
       -- RTC
       RTC_timestampNew      : in     std_logic;                     -- new current timestamp from system
@@ -643,6 +651,13 @@ begin
       GPIO_writeEna        => GPIO_writeEna,
       GPIO_addr            => GPIO_addr,
       GPIO_readable        => GPIO_readable,
+      EEPROM_ext_req       => EEPROM_ext_req_out,
+      EEPROM_ext_rnw       => EEPROM_ext_rnw_out,
+      EEPROM_ext_din       => EEPROM_ext_din_out,
+      EEPROM_ext_dma       => EEPROM_ext_dma_out,
+      EEPROM_ext_dout      => EEPROM_ext_dout_in,
+      EEPROM_ext_done      => EEPROM_ext_done_in,
+      save_cart_mode       => save_cart_mode,
       
       tilt                 => '0',
       AnalogTiltX          => (others => '0'),

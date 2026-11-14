@@ -230,6 +230,57 @@ assign port_ir_rx_disable = 1;
 // bridge endianness
 assign bridge_endian_little = 0;
 
+// ---- Layered saves: SD ROM + physical cartridge SRAM/Flash/EEPROM ----
+wire layered_cfg_s;
+wire cart_probe_done, cart_detect;
+wire layered_save_mode = layered_cfg_s && cart_detect && cart_probe_done;
+wire cart_probe_req, cart_probe_ready, cart_bus_ready;
+wire [1:0] cart_probe_addr;
+wire [31:0] cart_probe_data;
+reg cart_save_req;
+reg [15:0] cart_save_addr;
+reg cart_save_rnw;
+reg [7:0] cart_save_din;
+wire [7:0] cart_save_dout;
+wire cart_save_done;
+wire cart_eeprom_req, cart_eeprom_rnw, cart_eeprom_din, cart_eeprom_dma;
+wire cart_eeprom_dout, cart_eeprom_done;
+wire cart_request_sys, cart_request_74, cart_grant_sys;
+wire cart_bank1_dir, cart_bank2_dir, cart_bank3_dir;
+// The physical mux changes only after the previous rumble transaction ends.
+// The controller waits for the grant to cross back to clk_sys before driving.
+reg cart_slot_owner = 1'b0;
+synch_3 slot_request_sync(.i(cart_request_sys && layered_cfg_s), .o(cart_request_74), .clk(clk_74a), .rise(), .fall());
+synch_3 slot_grant_sync(.i(cart_slot_owner), .o(cart_grant_sys), .clk(clk_sys), .rise(), .fall());
+
+cart_header_probe cart_probe (
+    .clk(clk_sys), .reset_n(pll_core_locked && !core_reset_s),
+    .start(layered_cfg_s && cart_bus_ready && reset_n_s && dataslot_allcomplete_s),
+    .rd_req(cart_probe_req), .rd_addr(cart_probe_addr),
+    .rd_ready(cart_probe_ready), .rd_data(cart_probe_data),
+    .done(cart_probe_done), .present(cart_detect)
+);
+
+gba_cart_controller #(.ROM_WAIT(40), .ADDR_SETUP(16)) u_layered_cart (
+    .clk(clk_sys), .reset_n(pll_core_locked && !core_reset_s),
+    .bus_grant(cart_grant_sys), .bus_enable(cart_slot_owner),
+    .bus_request(cart_request_sys), .cart_ready(cart_bus_ready),
+    .cart_tran_bank1(cart_tran_bank1), .cart_tran_bank1_dir(cart_bank1_dir),
+    .cart_tran_bank2(cart_tran_bank2), .cart_tran_bank2_dir(cart_bank2_dir),
+    .cart_tran_bank3(cart_tran_bank3), .cart_tran_bank3_dir(cart_bank3_dir),
+    .cart_tran_bank0(cart_tran_bank0),
+    .cart_tran_pin30(cart_tran_pin30),
+    .rd_req(cart_probe_req), .rd_addr(cart_probe_addr),
+    .rd_data(cart_probe_data), .rd_ready(cart_probe_ready),
+    .save_req(cart_save_req), .save_addr(cart_save_addr),
+    .save_rnw(cart_save_rnw), .save_din(cart_save_din),
+    .save_dout(cart_save_dout), .save_done(cart_save_done),
+    .eeprom_req(cart_eeprom_req && layered_save_mode),
+    .eeprom_rnw(cart_eeprom_rnw), .eeprom_din(cart_eeprom_din),
+    .eeprom_dma(cart_eeprom_dma), .eeprom_dout(cart_eeprom_dout),
+    .eeprom_done(cart_eeprom_done)
+);
+
 // ---- Rumble driver (cart slot: DS Rumble Pak or GPIO rumble cart) ----
 // Pin map:
 //   bank3[7:0] = AD[7:0]
@@ -255,7 +306,7 @@ assign bridge_endian_little = 0;
 
 wire cart_rumble;                    // from gba_top, clk_sys domain
 wire cart_rumble_74;                 // synced to clk_74a
-synch_3 cart_rumble_sync(cart_rumble, cart_rumble_74, clk_74a);
+synch_3 cart_rumble_sync(.i(cart_rumble), .o(cart_rumble_74), .clk(clk_74a), .rise(), .fall());
 
 localparam [17:0] RUMBLE_PERIOD   = 18'd188560;  // 2.540 ms per flip
 
@@ -305,8 +356,11 @@ always @(posedge clk_74a) begin
     rumble_refresh <= rumble_refresh + 20'd1;
     if (&rumble_refresh) refresh_due <= 1'b1;
 
+    if (!wr_busy) cart_slot_owner <= cart_request_74;
+
     if (!wr_busy) begin
-        if (refresh_due || sent_ad1 != rumble_ad1 || sent_motor != cart_rumble_74) begin
+        if (!cart_slot_owner && !cart_request_74 &&
+            (refresh_due || sent_ad1 != rumble_ad1 || sent_motor != cart_rumble_74)) begin
             refresh_due   <= 1'b0;
             sent_ad1      <= rumble_ad1;
             sent_motor    <= cart_rumble_74;
@@ -333,17 +387,17 @@ always @(posedge clk_74a) begin
     end
 end
 
-assign cart_tran_bank3     = rumble_ad[7:0];
-assign cart_tran_bank3_dir = 1'b1;
-assign cart_tran_bank2     = rumble_ad[15:8];
-assign cart_tran_bank2_dir = 1'b1;
-assign cart_tran_bank1     = 8'h00;                 // A[23:16] = 0 (80000xxh)
-assign cart_tran_bank1_dir = 1'b1;
+assign cart_tran_bank3     = cart_slot_owner ? 8'hzz : rumble_ad[7:0];
+assign cart_tran_bank3_dir = cart_slot_owner ? cart_bank3_dir : 1'b1;
+assign cart_tran_bank2     = cart_slot_owner ? 8'hzz : rumble_ad[15:8];
+assign cart_tran_bank2_dir = cart_slot_owner ? cart_bank2_dir : 1'b1;
+assign cart_tran_bank1     = cart_slot_owner ? 8'hzz : 8'h00;                 // A[23:16] = 0 (80000xxh)
+assign cart_tran_bank1_dir = cart_slot_owner ? cart_bank1_dir : 1'b1;
 // bank0[7]=PHI=0, [6]=/WR, [5]=/RD=1, [4]=/CS
-assign cart_tran_bank0     = {1'b0, rumble_wr_n, 1'b1, rumble_cs_n};
+assign cart_tran_bank0     = cart_slot_owner ? 4'bzzzz : {1'b0, rumble_wr_n, 1'b1, rumble_cs_n};
 assign cart_tran_bank0_dir = 1'b1;
-assign cart_tran_pin30 = 1'b0;                      // /CS2: left to Pocket hardware (template default)
-assign cart_tran_pin30_dir = 1'bz;
+assign cart_tran_pin30 = cart_slot_owner ? 1'bz : 1'b0;                      // /CS2: left to Pocket hardware (template default)
+assign cart_tran_pin30_dir = cart_slot_owner ? 1'b1 : 1'bz;
 assign cart_pin30_pwroff_reset = 1'b0;
 assign cart_tran_pin31 = 1'bz;
 assign cart_tran_pin31_dir = 1'b0;
@@ -764,6 +818,7 @@ reg         bus_out_done;
 // Arbitration state machine
 localparam BUS_IDLE       = 3'd0;
 localparam BUS_EWRAM_WAIT = 3'd1;  // Wait for SDRAM ch2 to complete EWRAM access
+localparam BUS_CART_SAVE  = 3'd2;
 localparam BUS_DONE       = 3'd5;
 localparam BUS_SAVE_REQ   = 3'd6;  // Issue single-byte PSRAM access (saves, packed)
 localparam BUS_SAVE_WAIT  = 3'd7;  // Wait for PSRAM to complete (saves, packed)
@@ -793,6 +848,7 @@ always @(posedge clk_sys) begin
     bus_out_done            <= 0;
     sdram_ch2_rd            <= 0;
     sdram_ch2_wr            <= 0;
+    cart_save_req           <= 0;
 
     case (bus_state)
         BUS_IDLE: begin
@@ -813,6 +869,12 @@ always @(posedge clk_sys) begin
                         sdram_ch2_be  <= bus_out_be;
                     end
                     bus_state <= BUS_EWRAM_WAIT;
+                end else if (layered_save_mode) begin
+                    cart_save_req <= 1'b1;
+                    cart_save_addr <= bus_out_Adr[15:0];
+                    cart_save_rnw <= bus_out_rnw;
+                    cart_save_din <= bus_out_Din[7:0];
+                    bus_state <= BUS_CART_SAVE;
                 end else begin
                     // Save -> die 1: packed byte access via PSRAM
                     // GBA core uses byte addr as DWORD addr (1 byte per DWORD).
@@ -822,6 +884,13 @@ always @(posedge clk_sys) begin
                     bus_byte_sel  <= bus_out_Adr[0];
                     bus_state <= BUS_SAVE_REQ;
                 end
+            end
+        end
+
+        BUS_CART_SAVE: begin
+            if (cart_save_done) begin
+                if (!bus_is_write) bus_out_rdata <= {24'd0, cart_save_dout};
+                bus_state <= BUS_DONE;
             end
         end
 
@@ -890,8 +959,14 @@ always @(posedge clk_sys) begin
 
     if (~pll_core_locked) begin
         bus_state    <= BUS_IDLE;
+        cart_save_req <= 0;
         bus_out_done <= 0;
         bus_req_sent <= 0;
+    end else if (core_reset_s && bus_state == BUS_CART_SAVE) begin
+        // The cartridge controller restarts with the GBA. Do not leave an
+        // abandoned request waiting for a completion from the old session.
+        bus_state <= BUS_IDLE;
+        cart_save_req <= 0;
     end
 end
 
@@ -1163,7 +1238,8 @@ synch_3 s_reset_n(reset_n, reset_n_s, clk_sys);
 wire core_reset_s;
 synch_3 s_core_reset(core_reset, core_reset_s, clk_sys);
 
-wire reset_gba = ~pll_core_locked | ~dataslot_allcomplete_s | ~reset_n_s | core_reset_s | ~save_mem_ready;
+wire reset_gba = ~pll_core_locked | ~dataslot_allcomplete_s | ~reset_n_s | core_reset_s | ~save_mem_ready |
+                 (layered_cfg_s && ~cart_probe_done);
 
 // ---- BIOS Loading via shared ingress → gba_top internal BRAM ----
 // BIOS (16 KB) loads from data slot 4 at address 0x3xxxxxxx
@@ -1460,7 +1536,10 @@ synch_3 rtc_quirk_sync (
 // bus_out FSM packs save bytes densely (1 byte per PSRAM byte), so these
 // sizes match the actual save type sizes. RTC is a separate fixed-size slot.
 wire        rtc_active = rtc_quirk_s | force_rtc;
-wire [31:0] save_size_bytes = flash_1m_s ? 32'h0002_0000 : 32'h0001_0000;
+wire layered_save_mode_74;
+synch_3 layered_mode_sync(.i(layered_save_mode), .o(layered_save_mode_74), .clk(clk_74a), .rise(), .fall());
+wire [31:0] save_size_bytes = layered_save_mode_74 ? 32'd0 :
+                            (flash_1m_s ? 32'h0002_0000 : 32'h0001_0000);
 wire [31:0] rtc_size_bytes = rtc_active ? 32'd16 : 32'd0;
 
 // Continuously drive datatable port A with save size.
@@ -1491,6 +1570,10 @@ reg force_rtc = 0;        // 0 = Off, 1 = Force enable RTC/GPIO
 reg [1:0] turbo_mode = 0; // 0 = Disabled, 1 = Turbo A, 2 = Turbo B
 reg ff_video_stable = 1'b1; // 0 = Classic FF, 1 = wait for complete rendered lines
 
+reg layered_cfg = 1'b1;
+reg layered_cfg_received = 1'b0;
+synch_3 layered_cfg_sync(.i(layered_cfg), .o(layered_cfg_s), .clk(clk_sys), .rise(), .fall());
+
 reg [13:0] reset_counter = 0;
 wire       core_reset = (reset_counter != 0);
 
@@ -1505,6 +1588,12 @@ always @(posedge clk_74a) begin
         32'h84: force_rtc      <= bridge_wr_data[0];
         32'h88: turbo_mode     <= bridge_wr_data[1:0];
         32'h8C: ff_video_stable <= bridge_wr_data[0];
+        32'h90: begin
+            if (layered_cfg_received && layered_cfg != bridge_wr_data[0])
+                reset_counter <= 14'd8000;
+            layered_cfg <= bridge_wr_data[0];
+            layered_cfg_received <= 1'b1;
+        end
         endcase
     end
 end
@@ -1741,6 +1830,13 @@ gba_top #(
     .maxpixels           ( quirk_sprite ),
     .specialmodule       ( quirk_gpio | force_rtc_s ),
     .Rumble              ( cart_rumble ),
+    .save_cart_mode      ( layered_save_mode ),
+    .EEPROM_ext_req_out  ( cart_eeprom_req ),
+    .EEPROM_ext_rnw_out  ( cart_eeprom_rnw ),
+    .EEPROM_ext_din_out  ( cart_eeprom_din ),
+    .EEPROM_ext_dma_out  ( cart_eeprom_dma ),
+    .EEPROM_ext_dout_in  ( cart_eeprom_dout ),
+    .EEPROM_ext_done_in  ( cart_eeprom_done ),
     .savestate_number    ( 0 ),
     // RTC
     .RTC_timestampNew    ( rtc_new_s ),

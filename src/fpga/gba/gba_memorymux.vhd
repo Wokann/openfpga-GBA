@@ -113,6 +113,14 @@ entity gba_memorymux is
       GPIO_writeEna        : out    std_logic := '0';
       GPIO_addr            : out    std_logic_vector(1 downto 0);
       GPIO_readable        : in     std_logic;
+      -- Physical saves bypass Flash/EEPROM emulation; GPIO remains internal.
+      save_cart_mode       : in     std_logic := '0';
+      EEPROM_ext_req       : out    std_logic := '0';
+      EEPROM_ext_rnw       : out    std_logic := '0';
+      EEPROM_ext_din       : out    std_logic := '0';
+      EEPROM_ext_dma       : out    std_logic := '0';
+      EEPROM_ext_dout      : in     std_logic := '0';
+      EEPROM_ext_done      : in     std_logic := '0';
 
       tilt                 : in     std_logic;
       AnalogTiltX          : in     signed(7 downto 0);
@@ -441,6 +449,7 @@ begin
          PALETTE_OAM_we  <= (others => '0');
          GPIO_readEna    <= '0';
          GPIO_writeEna   <= '0';
+         EEPROM_ext_req <= '0';
          
          mem_bus_done <= '0';
          mem_bus_unread  <= '0';
@@ -1095,6 +1104,12 @@ begin
                end if;
                
             when EEPROMREAD =>
+               if (save_cart_mode = '1') then
+                  EEPROM_ext_req <= '1';
+                  EEPROM_ext_rnw <= '1';
+                  EEPROM_ext_dma <= last_access_dma;
+                  state <= EEPROM_WAITREAD;
+               else
                case (eepromMode) is
                   when EEPROM_IDLE | EEPROM_READADDRESS | EEPROM_WRITEDATA =>
                      rotate_data <= x"00000001";
@@ -1130,8 +1145,24 @@ begin
                      state       <= rotate;
                 end case;
                 
+               end if;
+
             when EEPROM_WAITREAD =>
-               if (bus_out_done = '1') then
+               if (save_cart_mode = '1') then
+                  if (EEPROM_ext_done = '1') then
+                     if (read_operation = '1') then
+                        rotate_data <= (others => '0');
+                        -- DMA halfword addresses alternate bits 1:0. Keep
+                        -- bit0 present after either halfword rotation.
+                        rotate_data(0) <= EEPROM_ext_dout;
+                        rotate_data(16) <= EEPROM_ext_dout;
+                        state <= ROTATE;
+                     else
+                        mem_bus_done <= '1';
+                        state <= IDLE;
+                     end if;
+                  end if;
+               elsif (bus_out_done = '1') then
                   rotate_data    <= (others => '0');
                   state          <= rotate;
                   if (bus_out_Dout(eeprombitpos) = '1') then 
@@ -1147,6 +1178,12 @@ begin
                if (dma_eepromcount = 0) then
                   state        <= IDLE;
                   mem_bus_done <= '1';
+               elsif (save_cart_mode = '1') then
+                  EEPROM_ext_req <= '1';
+                  EEPROM_ext_rnw <= '0';
+                  EEPROM_ext_din <= rotate_writedata(0);
+                  EEPROM_ext_dma <= last_access_dma;
+                  state <= EEPROM_WAITREAD;
                else
                   case (eepromMode) is
                      when EEPROM_IDLE =>
@@ -1278,12 +1315,18 @@ begin
                end if;
             
             when FLASHSRAMWRITEDECIDE1 =>
+               if (save_cart_mode = '1') then
+                  -- Forward EVERY byte, including Flash unlock/bank commands.
+                  state <= SRAMWRITE;
+               else
                state           <= FLASHSRAMWRITEDECIDE2;
                flashSRamdecide <= '1';
                if (flashSRamdecide = '0' and adr_save = x"e005555") then
                    flashNotSRam <= '1';
                end if;
                
+               end if;
+
             when FLASHSRAMWRITEDECIDE2 =>
                if (flashNotSRam = '1') then
                   state <= FLASHWRITE;
