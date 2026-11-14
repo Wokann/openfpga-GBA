@@ -48,7 +48,16 @@ entity gba_top is
       EEPROM_ext_dma_out    : out    std_logic := '0';             -- 1 = DMA3 burst, 0 = CPU poll
       EEPROM_ext_dout_in    : in     std_logic := '0';             -- read data bit
       EEPROM_ext_done_in    : in     std_logic := '0';             -- bit access done
+      -- Physical GPIO halfwords; local GPIO/RTC remains the fallback.
+      GPIO_ext_req         : out    std_logic := '0';
+      GPIO_ext_addr        : out    std_logic_vector(1 downto 0);
+      GPIO_ext_rnw         : out    std_logic;
+      GPIO_ext_din         : out    std_logic_vector(15 downto 0);
+      GPIO_ext_dout        : in     std_logic_vector(15 downto 0) := (others => '0');
+      GPIO_ext_done        : in     std_logic := '0';
+      GPIO_ext_readable    : in     std_logic := '0';
       save_cart_mode        : in     std_logic := '0';
+      gpio_cart_mode        : in     std_logic := '0';
       savestate_number      : in     integer;
       -- RTC
       RTC_timestampNew      : in     std_logic;                     -- new current timestamp from system
@@ -239,6 +248,7 @@ architecture arch of gba_top is
    signal PALETTE_OAM_dataout  : std_logic_vector(31 downto 0);
    signal PALETTE_OAM_we       : std_logic_vector(3 downto 0);
    
+   signal RTC_local_saveLoaded : std_logic;
    signal GPIO_done            : std_logic;
    signal GPIO_readEna         : std_logic;
    signal GPIO_Din             : std_logic_vector(3 downto 0);
@@ -502,6 +512,8 @@ begin
    savestate_loadstate <= load_state;
    savestate_address   <= Softmap_SaveState_ADDR;
    
+   RTC_local_saveLoaded <= RTC_saveLoaded and not gpio_cart_mode;
+
    igba_gpioRTCSolarGyro : entity work.gba_gpioRTCSolarGyro
    port map
    (
@@ -524,7 +536,7 @@ begin
       RTC_timestampIn      => RTC_timestampIn,   
       RTC_timestampSaved   => RTC_timestampSaved,
       RTC_savedtimeIn      => RTC_savedtimeIn,   
-      RTC_saveLoaded       => RTC_saveLoaded,    
+      RTC_saveLoaded       => RTC_local_saveLoaded,
       RTC_timestampOut     => RTC_timestampOut,  
       RTC_savedtimeOut     => RTC_savedtimeOut,  
       RTC_inuse            => RTC_inuse,
@@ -658,6 +670,14 @@ begin
       EEPROM_ext_dout      => EEPROM_ext_dout_in,
       EEPROM_ext_done      => EEPROM_ext_done_in,
       save_cart_mode       => save_cart_mode,
+      gpio_cart_mode       => gpio_cart_mode,
+      GPIO_ext_req         => GPIO_ext_req,
+      GPIO_ext_addr        => GPIO_ext_addr,
+      GPIO_ext_rnw         => GPIO_ext_rnw,
+      GPIO_ext_din         => GPIO_ext_din,
+      GPIO_ext_dout        => GPIO_ext_dout,
+      GPIO_ext_done        => GPIO_ext_done,
+      GPIO_ext_readable    => GPIO_ext_readable,
       
       tilt                 => '0',
       AnalogTiltX          => (others => '0'),

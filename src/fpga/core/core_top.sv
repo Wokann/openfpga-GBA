@@ -230,10 +230,14 @@ assign port_ir_rx_disable = 1;
 // bridge endianness
 assign bridge_endian_little = 0;
 
-// ---- Layered saves: SD ROM + physical cartridge SRAM/Flash/EEPROM ----
-wire layered_cfg_s;
+// ---- Layered saves: SD ROM + physical cartridge saves and GPIO ----
+wire layered_cfg_s, cart_hw_cfg_s;
+// Save routing and peripheral routing are separate. Cartridge saves imply
+// cartridge peripherals; the hardware preference applies to SD-save mode.
+wire cart_probe_enable = layered_cfg_s || cart_hw_cfg_s;
 wire cart_probe_done, cart_detect;
 wire layered_save_mode = layered_cfg_s && cart_detect && cart_probe_done;
+wire cart_hw_mode = cart_probe_enable && cart_detect && cart_probe_done;
 wire cart_probe_req, cart_probe_ready, cart_bus_ready;
 wire [1:0] cart_probe_addr;
 wire [31:0] cart_probe_data;
@@ -245,17 +249,41 @@ wire [7:0] cart_save_dout;
 wire cart_save_done;
 wire cart_eeprom_req, cart_eeprom_rnw, cart_eeprom_din, cart_eeprom_dma;
 wire cart_eeprom_dout, cart_eeprom_done;
+wire cart_gpio_req, cart_gpio_rnw, cart_gpio_done, cart_gpio_readable;
+wire [1:0] cart_gpio_addr;
+wire [15:0] cart_gpio_din, cart_gpio_dout;
+// C8 is not guaranteed to reset on a core restart. Establish write-only
+// mode once after a successful probe, without touching data/direction/RTC.
+reg cart_gpio_init_req, cart_gpio_init_started, cart_gpio_initialized;
+always @(posedge clk_sys) begin
+    cart_gpio_init_req <= 0;
+    if (!pll_core_locked || core_reset_s) begin
+        cart_gpio_init_started <= 0;
+        cart_gpio_initialized <= 0;
+    end else if (cart_hw_mode && !cart_gpio_init_started) begin
+        cart_gpio_init_req <= 1;
+        cart_gpio_init_started <= 1;
+    end else if (cart_gpio_init_started && cart_gpio_done) begin
+        cart_gpio_initialized <= 1;
+    end
+end
+// Allow the upstream rumble writer only in fallback, never while probing
+// or between real GPIO transactions. Start inhibited at FPGA power-on.
+reg [2:0] fallback_rumble_sync = 3'b000;
+always @(posedge clk_74a)
+    fallback_rumble_sync <= {fallback_rumble_sync[1:0],
+        cart_probe_done && !cart_detect};
 wire cart_request_sys, cart_request_74, cart_grant_sys;
 wire cart_bank1_dir, cart_bank2_dir, cart_bank3_dir;
 // The physical mux changes only after the previous rumble transaction ends.
 // The controller waits for the grant to cross back to clk_sys before driving.
 reg cart_slot_owner = 1'b0;
-synch_3 slot_request_sync(.i(cart_request_sys && layered_cfg_s), .o(cart_request_74), .clk(clk_74a), .rise(), .fall());
+synch_3 slot_request_sync(.i(cart_request_sys && cart_probe_enable), .o(cart_request_74), .clk(clk_74a), .rise(), .fall());
 synch_3 slot_grant_sync(.i(cart_slot_owner), .o(cart_grant_sys), .clk(clk_sys), .rise(), .fall());
 
 cart_header_probe cart_probe (
     .clk(clk_sys), .reset_n(pll_core_locked && !core_reset_s),
-    .start(layered_cfg_s && cart_bus_ready && reset_n_s && dataslot_allcomplete_s),
+    .start(cart_probe_enable && cart_bus_ready && reset_n_s && dataslot_allcomplete_s),
     .rd_req(cart_probe_req), .rd_addr(cart_probe_addr),
     .rd_ready(cart_probe_ready), .rd_data(cart_probe_data),
     .done(cart_probe_done), .present(cart_detect)
@@ -278,7 +306,13 @@ gba_cart_controller #(.ROM_WAIT(40), .ADDR_SETUP(16)) u_layered_cart (
     .eeprom_req(cart_eeprom_req && layered_save_mode),
     .eeprom_rnw(cart_eeprom_rnw), .eeprom_din(cart_eeprom_din),
     .eeprom_dma(cart_eeprom_dma), .eeprom_dout(cart_eeprom_dout),
-    .eeprom_done(cart_eeprom_done)
+    .eeprom_done(cart_eeprom_done),
+    .gpio_req(cart_gpio_init_req || (cart_gpio_req && cart_hw_mode && cart_gpio_initialized)),
+    .gpio_addr(cart_gpio_initialized ? cart_gpio_addr : 2'd2),
+    .gpio_rnw(cart_gpio_initialized && cart_gpio_rnw),
+    .gpio_din(cart_gpio_initialized ? cart_gpio_din : 16'd0),
+    .gpio_dout(cart_gpio_dout), .gpio_done(cart_gpio_done),
+    .gpio_readable(cart_gpio_readable)
 );
 
 // ---- Rumble driver (cart slot: DS Rumble Pak or GPIO rumble cart) ----
@@ -359,7 +393,7 @@ always @(posedge clk_74a) begin
     if (!wr_busy) cart_slot_owner <= cart_request_74;
 
     if (!wr_busy) begin
-        if (!cart_slot_owner && !cart_request_74 &&
+        if (((!layered_cfg && !cart_hw_cfg) || fallback_rumble_sync[2]) && !cart_slot_owner && !cart_request_74 &&
             (refresh_due || sent_ad1 != rumble_ad1 || sent_motor != cart_rumble_74)) begin
             refresh_due   <= 1'b0;
             sent_ad1      <= rumble_ad1;
@@ -1239,7 +1273,7 @@ wire core_reset_s;
 synch_3 s_core_reset(core_reset, core_reset_s, clk_sys);
 
 wire reset_gba = ~pll_core_locked | ~dataslot_allcomplete_s | ~reset_n_s | core_reset_s | ~save_mem_ready |
-                 (layered_cfg_s && ~cart_probe_done);
+                 (cart_probe_enable && (~cart_probe_done || (cart_detect && !cart_gpio_initialized)));
 
 // ---- BIOS Loading via shared ingress → gba_top internal BRAM ----
 // BIOS (16 KB) loads from data slot 4 at address 0x3xxxxxxx
@@ -1540,7 +1574,9 @@ wire layered_save_mode_74;
 synch_3 layered_mode_sync(.i(layered_save_mode), .o(layered_save_mode_74), .clk(clk_74a), .rise(), .fall());
 wire [31:0] save_size_bytes = layered_save_mode_74 ? 32'd0 :
                             (flash_1m_s ? 32'h0002_0000 : 32'h0001_0000);
-wire [31:0] rtc_size_bytes = rtc_active ? 32'd16 : 32'd0;
+wire cart_hw_mode_74;
+synch_3 cart_hw_mode_sync(.i(cart_hw_mode), .o(cart_hw_mode_74), .clk(clk_74a), .rise(), .fall());
+wire [31:0] rtc_size_bytes = rtc_active && !cart_hw_mode_74 ? 32'd16 : 32'd0;
 
 // Continuously drive datatable port A with save size.
 // Writing every cycle is intentional: the Pocket OS may write to the same
@@ -1571,6 +1607,9 @@ reg [1:0] turbo_mode = 0; // 0 = Disabled, 1 = Turbo A, 2 = Turbo B
 reg ff_video_stable = 1'b1; // 0 = Classic FF, 1 = wait for complete rendered lines
 
 reg layered_cfg = 1'b1;
+reg cart_hw_cfg = 1'b1;
+reg cart_hw_cfg_received = 1'b0;
+synch_3 cart_hw_cfg_sync(.i(cart_hw_cfg), .o(cart_hw_cfg_s), .clk(clk_sys), .rise(), .fall());
 reg layered_cfg_received = 1'b0;
 synch_3 layered_cfg_sync(.i(layered_cfg), .o(layered_cfg_s), .clk(clk_sys), .rise(), .fall());
 
@@ -1593,6 +1632,12 @@ always @(posedge clk_74a) begin
                 reset_counter <= 14'd8000;
             layered_cfg <= bridge_wr_data[0];
             layered_cfg_received <= 1'b1;
+        end
+        32'h94: begin
+            if (cart_hw_cfg_received && cart_hw_cfg != bridge_wr_data[0])
+                reset_counter <= 14'd8000;
+            cart_hw_cfg <= bridge_wr_data[0];
+            cart_hw_cfg_received <= 1'b1;
         end
         endcase
     end
@@ -1831,6 +1876,14 @@ gba_top #(
     .specialmodule       ( quirk_gpio | force_rtc_s ),
     .Rumble              ( cart_rumble ),
     .save_cart_mode      ( layered_save_mode ),
+    .gpio_cart_mode      ( cart_hw_mode ),
+    .GPIO_ext_req        ( cart_gpio_req ),
+    .GPIO_ext_addr       ( cart_gpio_addr ),
+    .GPIO_ext_rnw        ( cart_gpio_rnw ),
+    .GPIO_ext_din        ( cart_gpio_din ),
+    .GPIO_ext_dout       ( cart_gpio_dout ),
+    .GPIO_ext_done       ( cart_gpio_done ),
+    .GPIO_ext_readable   ( cart_gpio_readable ),
     .EEPROM_ext_req_out  ( cart_eeprom_req ),
     .EEPROM_ext_rnw_out  ( cart_eeprom_rnw ),
     .EEPROM_ext_din_out  ( cart_eeprom_din ),

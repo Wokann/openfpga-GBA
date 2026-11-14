@@ -113,8 +113,17 @@ entity gba_memorymux is
       GPIO_writeEna        : out    std_logic := '0';
       GPIO_addr            : out    std_logic_vector(1 downto 0);
       GPIO_readable        : in     std_logic;
-      -- Physical saves bypass Flash/EEPROM emulation; GPIO remains internal.
+      -- Physical GPIO halfwords; local GPIO/RTC remains the fallback.
+      GPIO_ext_req         : out    std_logic := '0';
+      GPIO_ext_addr        : out    std_logic_vector(1 downto 0);
+      GPIO_ext_rnw         : out    std_logic;
+      GPIO_ext_din         : out    std_logic_vector(15 downto 0);
+      GPIO_ext_dout        : in     std_logic_vector(15 downto 0) := (others => '0');
+      GPIO_ext_done        : in     std_logic := '0';
+      GPIO_ext_readable    : in     std_logic := '0';
+      -- Physical saves bypass Flash/EEPROM emulation.
       save_cart_mode       : in     std_logic := '0';
+      gpio_cart_mode       : in     std_logic := '0';
       EEPROM_ext_req       : out    std_logic := '0';
       EEPROM_ext_rnw       : out    std_logic := '0';
       EEPROM_ext_din       : out    std_logic := '0';
@@ -155,6 +164,10 @@ architecture arch of gba_memorymux is
       READ_UNREADABLE,
       ROTATE,
       READ_GPIO,
+      GPIO_CART_READ,
+      GPIO_CART_WRITE,
+      GPIO_CART_ROM,
+      GPIO_CART_LATCH,
 
       WRITE_WRAMLARGE,
       WRITE_WRAMSMALL,
@@ -176,6 +189,8 @@ architecture arch of gba_memorymux is
       FLASH_BLOCKWAIT
    );
    signal state : tState := IDLE;
+   signal gpio_sample : std_logic_vector(31 downto 0);
+   signal gpio_cart_addr : std_logic_vector(1 downto 0);
    
    signal gb_on_1            : std_logic := '0';
    
@@ -276,7 +291,9 @@ architecture arch of gba_memorymux is
    signal SAVESTATE_EEPROM_BACK : std_logic_vector(31 downto 0);
    signal SAVESTATE_FLASH_BACK  : std_logic_vector(16 downto 0);
    
-begin 
+begin
+
+   GPIO_ext_addr <= gpio_cart_addr;
 
    settle <= '1' when registersettle = '1' or (new_cycles_valid = '1' and dma_soon = '1') else '0';
 
@@ -450,6 +467,7 @@ begin
          GPIO_readEna    <= '0';
          GPIO_writeEna   <= '0';
          EEPROM_ext_req <= '0';
+         GPIO_ext_req <= '0';
          
          mem_bus_done <= '0';
          mem_bus_unread  <= '0';
@@ -546,10 +564,31 @@ begin
                            state         <= READOAMRAM;
 
                         when x"8" | x"9" | x"A" | x"B" | x"C" =>
-                           if (unsigned(adr_save(24 downto 2)) >= unsigned(MaxPakAddr)) then
+                           if (gpio_cart_mode = '1' and GPIO_ext_readable = '1' and
+                               ((unsigned(adr_save(24 downto 1)) >= 16#62# and unsigned(adr_save(24 downto 1)) <= 16#64#) or
+                                (acc_save = ACCESS_32BIT and unsigned(adr_save(24 downto 2)) = 16#32#))) then
+                              GPIO_ext_rnw <= '1';
+                              rotate_data <= (others => '0');
+                              gpio_sample <= (others => '0');
+                              if (acc_save = ACCESS_32BIT) then
+                                 gpio_cart_addr <= adr_save(3) & '0'; -- word-align C4/C8
+                              else
+                                 gpio_cart_addr <= std_logic_vector(unsigned(adr_save(2 downto 1)) - 2);
+                              end if;
+                              if (acc_save = ACCESS_32BIT and adr_save(3) = '1') then
+                                 -- C8 is GPIO, CA is still the SD ROM. Fetch the
+                                 -- SD word first, then replace only its low half.
+                                 cache_read_addr <= adr_save(24 downto 2);
+                                 cache_read_enable <= '1';
+                                 state <= GPIO_CART_ROM;
+                              else
+                                 GPIO_ext_req <= '1';
+                                 state <= GPIO_CART_READ;
+                              end if;
+                           elsif (unsigned(adr_save(24 downto 2)) >= unsigned(MaxPakAddr)) then
                               state       <= READAFTERPAK;
                            -- GPIO registers only replace ROM data once the game sets the read-enable bit (0x80000C8 bit 0)
-                           elsif (specialmodule = '1' and GPIO_readable = '1' and unsigned(adr_save) >= 16#80000C4# and unsigned(adr_save) <= 16#80000C8#) then
+                           elsif (gpio_cart_mode = '0' and specialmodule = '1' and GPIO_readable = '1' and unsigned(adr_save) >= 16#80000C4# and unsigned(adr_save) <= 16#80000C8#) then
                               state             <= READ_GPIO;
                               mem_bus_done <= '0';
                               cache_read_enable <= '0';
@@ -616,10 +655,27 @@ begin
                         when x"5" => state <= WRITE_PALETTE;   mem_bus_done <= '1';
                         when x"6" => state <= WRITE_VRAM;      mem_bus_done <= not vram_blocked or adr_save(16); vramwait <= vram_blocked;
                         when x"7" => state <= WRITE_OAM;       mem_bus_done <= '1';
-                        when x"8" =>
+                        when x"8" | x"9" | x"A" | x"B" | x"C" =>
                            mem_bus_done <= '1';
                            state        <= IDLE;
-                           if (specialmodule = '1') then
+                           if (gpio_cart_mode = '1') then
+                              -- ROM has no byte write lane. STRH/STR are the
+                              -- documented GPIO accesses; ignore STRB.
+                              if (acc_save /= ACCESS_8BIT and
+                                  ((unsigned(adr_save(24 downto 1)) >= 16#62# and unsigned(adr_save(24 downto 1)) <= 16#64#) or
+                                   (acc_save = ACCESS_32BIT and unsigned(adr_save(24 downto 2)) = 16#32#))) then
+                                 GPIO_ext_req <= '1';
+                                 GPIO_ext_rnw <= '0';
+                                 GPIO_ext_din <= Dout_save(15 downto 0);
+                                 if (acc_save = ACCESS_32BIT) then
+                                    gpio_cart_addr <= adr_save(3) & '0';
+                                 else
+                                    gpio_cart_addr <= std_logic_vector(unsigned(adr_save(2 downto 1)) - 2);
+                                 end if;
+                                 mem_bus_done <= '0';
+                                 state <= GPIO_CART_WRITE;
+                              end if;
+                           elsif (adr_save(27 downto 24) = x"8" and specialmodule = '1') then
                               if (unsigned(adr_save) >= 16#80000C4# and unsigned(adr_save) <= 16#80000C8#) then
                                  GPIO_writeEna <= '1';
                                  GPIO_addr     <= std_logic_vector(to_unsigned(to_integer(unsigned(adr_save(3 downto 1))) - 4 / 2, 2));
@@ -899,6 +955,58 @@ begin
                mem_bus_unread <= unread_next;
                state <= IDLE;
                
+            when GPIO_CART_ROM =>
+               -- The upstream cache reports hits itself; misses complete
+               -- directly on the SDRAM return (then fill the cache).
+               if (sdram_read_done = '1') then
+                  rotate_data <= sdram_read_data;
+                  sdram_addr_buf <= adr_save(24 downto 3);
+                  GPIO_ext_req <= '1';
+                  state <= GPIO_CART_READ;
+               end if;
+               if (cache_read_done = '1') then
+                  rotate_data <= cache_read_data;
+                  sdram_addr_buf <= adr_save(24 downto 3);
+                  sdram_data_buf <= cache_read_full;
+                  GPIO_ext_req <= '1';
+                  state <= GPIO_CART_READ;
+               end if;
+
+            when GPIO_CART_READ =>
+               if (GPIO_ext_done = '1') then
+                  if (acc_save = ACCESS_32BIT and gpio_cart_addr = "00") then
+                     gpio_sample(15 downto 0) <= GPIO_ext_dout;
+                     gpio_cart_addr <= "01";
+                     GPIO_ext_req <= '1';
+                  else
+                     if (gpio_cart_addr = "01") then
+                        gpio_sample(31 downto 16) <= GPIO_ext_dout;
+                     else
+                        gpio_sample(15 downto 0) <= GPIO_ext_dout;
+                     end if;
+                     if (acc_save = ACCESS_32BIT and gpio_cart_addr = "10") then
+                        gpio_sample(31 downto 16) <= rotate_data(31 downto 16);
+                     end if;
+                     state <= GPIO_CART_LATCH;
+                  end if;
+               end if;
+
+            when GPIO_CART_LATCH =>
+               rotate_data <= gpio_sample;
+               state <= ROTATE;
+
+            when GPIO_CART_WRITE =>
+               if (GPIO_ext_done = '1') then
+                  if (acc_save = ACCESS_32BIT and gpio_cart_addr = "00") then
+                     gpio_cart_addr <= "01";
+                     GPIO_ext_din <= Dout_save(31 downto 16);
+                     GPIO_ext_req <= '1';
+                  else
+                     mem_bus_done <= '1';
+                     state <= IDLE;
+                  end if;
+               end if;
+
             when READ_GPIO =>
                if (GPIO_done = '1') then
                   mem_bus_done <= '1';

@@ -19,7 +19,7 @@ jobs:
       - name: Install RTL simulators
         run: sudo apt-get update && sudo apt-get install -y iverilog ghdl
 
-      - name: Test layered saves and shared cartridge slot
+      - name: Test layered GPIO, saves and shared cartridge slot
         run: python3 scripts/test_layered.py
 
       - name: Compile

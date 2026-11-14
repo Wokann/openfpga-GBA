@@ -1,6 +1,6 @@
 // Physical saves integrated with the v1.0.1 slot/rumble ownership protocol.
 // Save-bus timing is adapted from backup/layered-20260814 (f245435).
-// ROM reads serve the header probe only; game ROM and GPIO/RTC stay upstream.
+// Game ROM stays on SD; C4/C6/C8 transactions reach the physical ROM GPIO.
 // SRAM/Flash use CS2 with data on A[23:16]. EEPROM uses ROMCS/A23/D0.
 // Bus ownership is retained through an entire EEPROM session.
 // Timing references: https://github.com/jojolebarjos/gba-cartridge and
@@ -26,6 +26,8 @@ module gba_cart_controller #(
     parameter integer RELEASE_DELAY = 32,
     parameter integer EEPROM_SESS_TIMEOUT = 1024, // clk_sys cycles without EEPROM
                                                   // access before releasing ROMCS/A23
+    // Reuse upstream rumble bus phases (~270 ns), rescaled to clk_sys.
+    parameter integer GPIO_PHASE = 27,
     parameter integer RESET_LEN  = 4096
 ) (
     input  wire        clk,
@@ -60,6 +62,15 @@ module gba_cart_controller #(
     input  wire [7:0]  save_din,
     output reg  [7:0]  save_dout,
     output reg         save_done,
+
+    // Raw ROM GPIO halfword access. No peripheral-specific protocol here.
+    input  wire        gpio_req,
+    input  wire [1:0]  gpio_addr,         // 0=C4, 1=C6, 2=C8
+    input  wire        gpio_rnw,
+    input  wire [15:0] gpio_din,
+    output reg  [15:0] gpio_dout,
+    output reg         gpio_done,
+    output reg         gpio_readable,    // acknowledged C8 bit 0
 
     // ---- EEPROM bit access (from gba_top, cart mode) ----
     input  wire        eeprom_req,
@@ -106,6 +117,12 @@ module gba_cart_controller #(
                                        // command burst and data burst
     localparam S_ACQUIRE = 4'd7; // wait for the upstream rumble driver to finish
 
+    localparam S_GPIO = 4'd8;
+    reg [1:0] gpio_addr_r;
+    reg gpio_rnw_r;
+    reg [15:0] gpio_din_r;
+    wire [7:0] gpio_word_addr = 8'h62 + {6'd0, gpio_addr_r};
+
     reg [3:0]  state;
     reg [3:0]  access_state;
     reg [7:0]  save_din_r;
@@ -116,7 +133,8 @@ module gba_cart_controller #(
     localparam EEPROM_CYCLES = EEPROM_ADDR_SETUP + EEPROM_HALF_CYCLE;
     localparam ACCESS_CYCLES = ROM_SAVE_CYCLES > EEPROM_CYCLES ? ROM_SAVE_CYCLES : EEPROM_CYCLES;
     localparam HOLD_CYCLES = ACCESS_CYCLES > 2*RELEASE_DELAY ? ACCESS_CYCLES : 2*RELEASE_DELAY;
-    localparam ACC_BITS = $clog2((HOLD_CYCLES > 17 ? HOLD_CYCLES : 17) + 1);
+    localparam MAX_CYCLES = HOLD_CYCLES > 6*GPIO_PHASE ? HOLD_CYCLES : 6*GPIO_PHASE;
+    localparam ACC_BITS = $clog2((MAX_CYCLES > 17 ? MAX_CYCLES : 17) + 1);
     reg [ACC_BITS-1:0] acc_cnt;
     reg [15:0] save_addr_r;
     reg        save_is_write;
@@ -184,6 +202,12 @@ module gba_cart_controller #(
             word_idx        <= 1'b0;
             header_index    <= 2'd0;
             acc_cnt         <= '0;
+            gpio_addr_r     <= 0;
+            gpio_rnw_r      <= 1;
+            gpio_din_r      <= 0;
+            gpio_dout       <= 0;
+            gpio_done       <= 0;
+            gpio_readable   <= 0;
             rd_data         <= 32'd0;
             rd_ready        <= 1'b0;
             save_dout       <= 8'd0;
@@ -208,6 +232,7 @@ module gba_cart_controller #(
             cs2_n           <= 1'b1;
             wr_n            <= 1'b1;
         end else begin
+            gpio_done <= 1'b0;
             rd_ready  <= 1'b0;
             save_done <= 1'b0;
             eeprom_done <= 1'b0;
@@ -245,6 +270,14 @@ module gba_cart_controller #(
                         word_idx  <= 1'b0;
                         acc_cnt   <= '0;
                         access_state <= S_ROM_CS;
+                        state <= S_ACQUIRE;
+                    end else if (gpio_req) begin
+                        eeprom_sess <= 1'b0;
+                        gpio_addr_r <= gpio_addr;
+                        gpio_rnw_r <= gpio_rnw;
+                        gpio_din_r <= gpio_din;
+                        acc_cnt <= '0;
+                        access_state <= S_GPIO;
                         state <= S_ACQUIRE;
                     end else if (save_req) begin
                         eeprom_sess     <= 1'b0;
@@ -350,6 +383,32 @@ module gba_cart_controller #(
                     out_bank3_dir <= 1'b0;
                     rd_ready       <= 1'b1;
                     state          <= S_IDLE;
+                end
+
+                // Same six phases as the upstream physical rumble writer,
+                // plus AD turnaround and sampling for reads. CS2 stays idle.
+                S_GPIO: begin
+                    out_bank1 <= 0;
+                    out_bank1_dir <= 1;
+                    cs2_n <= 1;
+                    cs_n <= !(acc_cnt >= GPIO_PHASE && acc_cnt < 5*GPIO_PHASE);
+                    rd_n <= !(gpio_rnw_r && acc_cnt >= 3*GPIO_PHASE && acc_cnt < 4*GPIO_PHASE);
+                    wr_n <= !(!gpio_rnw_r && acc_cnt >= 3*GPIO_PHASE && acc_cnt < 4*GPIO_PHASE);
+                    out_bank2 <= acc_cnt < 2*GPIO_PHASE ? 8'h00 : gpio_din_r[15:8];
+                    out_bank3 <= acc_cnt < 2*GPIO_PHASE ? gpio_word_addr : gpio_din_r[7:0];
+                    out_bank2_dir <= acc_cnt < 2*GPIO_PHASE || !gpio_rnw_r;
+                    out_bank3_dir <= acc_cnt < 2*GPIO_PHASE || !gpio_rnw_r;
+                    if (gpio_rnw_r && acc_cnt == 4*GPIO_PHASE)
+                        gpio_dout <= {cart_tran_bank2, cart_tran_bank3};
+                    if (acc_cnt == 6*GPIO_PHASE - 1) begin
+                        out_bank1_dir <= 0;
+                        out_bank2_dir <= 0;
+                        out_bank3_dir <= 0;
+                        if (!gpio_rnw_r && gpio_addr_r == 2)
+                            gpio_readable <= gpio_din_r[0];
+                        gpio_done <= 1;
+                        state <= S_IDLE;
+                    end else acc_cnt <= acc_cnt + 1'b1;
                 end
 
                 // ---- SRAM / Flash byte access (CS2#) ----

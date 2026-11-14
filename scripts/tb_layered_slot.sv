@@ -1,6 +1,6 @@
 `timescale 1ns/1ps
 module tb_layered_slot;
-    reg clk=0, clk74=0, reset_n=0, restart=0, cfg=1, motor=0;
+    reg clk=0, clk74=0, reset_n=0, restart=0, cfg=1, hw_cfg=0, motor=0;
     always #5 clk=~clk;
     always #6.734 clk74=~clk74;
     tri [7:0] b1,b2,b3;
@@ -11,12 +11,16 @@ module tb_layered_slot;
     reg [16:0] save_addr=0;
     reg [7:0] save_din=0;
     reg e_req=0,e_rnw=0,e_din=0,e_dma=1;
+    reg g_req=0,g_rnw=0;
+    reg [1:0] g_addr=0;
+    reg [15:0] g_din=0;
     slot_fixture dut (
         .clk_sys(clk), .clk_74a(clk74), .pll_core_locked(reset_n),
         .core_reset_s(restart), .reset_n_s(1'b1), .dataslot_allcomplete_s(1'b1),
-        .cfg(cfg), .motor(motor), .save_req(save_req), .save_rnw(save_rnw),
+        .cfg(cfg), .hw_cfg(hw_cfg), .motor(motor), .save_req(save_req), .save_rnw(save_rnw),
         .save_addr(save_addr), .save_din(save_din),
         .e_req(e_req), .e_rnw(e_rnw), .e_din(e_din), .e_dma(e_dma),
+        .g_req(g_req), .g_rnw(g_rnw), .g_addr(g_addr), .g_din(g_din),
         .cart_tran_bank1(b1), .cart_tran_bank2(b2), .cart_tran_bank3(b3),
         .cart_tran_bank0(b0), .cart_tran_pin30(pin30), .cart_tran_pin31(pin31),
         .cart_tran_bank1_dir(d1), .cart_tran_bank2_dir(d2), .cart_tran_bank3_dir(d3),
@@ -33,6 +37,16 @@ module tb_layered_slot;
     reg [7:0] ram [0:131071];
     reg flash_mode=0, bank=0;
     integer flash_state=0, rumble_writes=0, save_writes=0, rom_reads=0, e_writes=0;
+    reg header_present=1;
+    reg [3:0] gpio_data=0,gpio_dir=0,gpio_input=0;
+    reg gpio_enable=1; // warm cartridge: initialization must turn this off
+    integer gpio_writes=0,gpio_reads=0;
+    reg rtc_mode=0;
+    reg [7:0] rtc_command=0;
+    localparam [7:0] RTC_RESPONSE=8'hA6;
+    integer rtc_command_bits=0,rtc_bit=0;
+    wire [3:0] gpio_pins = (gpio_data & gpio_dir) |
+        ((rtc_mode ? {2'b00,RTC_RESPONSE[rtc_bit],1'b0} : gpio_input) & ~gpio_dir);
     integer i;
     initial for(i=0;i<131072;i=i+1) ram[i]=8'hFF;
     always @(negedge cs) begin
@@ -44,11 +58,19 @@ module tb_layered_slot;
     always @(negedge rd) begin
         if(!cs && e_active) e_bit<=~e_bit;
         else if(!cs && dut.cart_slot_owner) begin
-            if(rom_addr<24'h58 || rom_addr>24'h5F) $fatal(1,"non-header ROM read");
-            rom_reads=rom_reads+1;
+            if(rom_addr>=24'h62 && rom_addr<=24'h64) begin
+                if(d2 || d3 || !cs2) $fatal(1,"GPIO read direction/CS2 error");
+                gpio_reads=gpio_reads+1;
+            end else begin
+                if(rom_addr<24'h58 || rom_addr>24'h5F) $fatal(1,"non-header ROM read");
+                rom_reads=rom_reads+1;
+            end
         end
     end
-    wire [15:0] rom_word = rom_addr[15:0]^16'hA55A;
+    wire [15:0] rom_word = (rom_addr==24'h62 && gpio_enable) ? {12'd0,gpio_pins} :
+        (rom_addr==24'h63 && gpio_enable) ? {12'd0,gpio_dir} :
+        (rom_addr==24'h64 && gpio_enable) ? 16'h0001 :
+        header_present ? (rom_addr[15:0]^16'hA55A) : 16'hFFFF;
     assign b2=(!cs && !rd && !e_active) ? rom_word[15:8] : 8'hzz;
     assign b3=(!cs && e_active && wr && !d3) ? {7'b0,e_bit} :
               (!cs && !rd && !e_active) ? rom_word[7:0] : 8'hzz;
@@ -68,6 +90,29 @@ module tb_layered_slot;
                 4: begin ram[{bank,save_latch}]<=b1; flash_state=0; end
             endcase
         end else if(!cs && e_active) e_writes=e_writes+1;
+        else if(!cs && dut.cart_slot_owner) begin
+            if(!d1 || !d2 || !d3 || !cs2) $fatal(1,"GPIO write direction/CS2 error");
+            gpio_writes=gpio_writes+1;
+            case(rom_addr)
+                24'h62: begin
+                    if(rtc_mode) begin
+                        if(!b3[2] || !gpio_data[2]) begin
+                            rtc_command_bits=0;rtc_command=0;rtc_bit=0;
+                        end else if(!gpio_data[0] && b3[0] && gpio_dir[1]) begin
+                            if(rtc_command_bits>=8) $fatal(1,"unexpected RTC command clock");
+                            rtc_command[rtc_command_bits]=b3[1];
+                            rtc_command_bits=rtc_command_bits+1;
+                        end else if(gpio_data[0] && !b3[0] && !gpio_dir[1]) begin
+                            rtc_bit=(rtc_bit+1)%8;
+                        end
+                    end
+                    gpio_data=b3[3:0];
+                end
+                24'h63: gpio_dir=b3[3:0];
+                24'h64: gpio_enable=b3[0];
+                default: $fatal(1,"GPIO wrote outside C4/C6/C8");
+            endcase
+        end
         else if(!cs && !dut.cart_slot_owner) begin
             if(rom_addr!=24'h62 && rom_addr!=24'h63) $fatal(1,"rumble address changed");
             rumble_writes=rumble_writes+1;
@@ -101,14 +146,68 @@ module tb_layered_slot;
             @(negedge clk);
         end
     endtask
-    integer before_rumble,before_saves;
+    task gpio_access(input bit reading,input [1:0] addr,input [15:0] value,input [15:0] expected);
+        begin
+            @(negedge clk);g_addr=addr;g_rnw=reading;g_din=value;g_req=1;
+            @(negedge clk);g_req=0;g_din=16'hDEAD;g_addr=3;g_rnw=~reading;
+            wait(dut.cart_gpio_done);#1;
+            if(reading && dut.cart_gpio_dout!==expected)
+                $fatal(1,"GPIO %d: got %h expected %h",addr,dut.cart_gpio_dout,expected);
+            if(!cs || !rd || !wr) $fatal(1,"GPIO completed before physical strobes ended");
+            @(negedge clk);
+        end
+    endtask
+    integer before_rumble,before_saves,before_gpio,j;
+    reg [7:0] command;
+    reg [3:0] expected_pins;
     initial begin
         repeat(5) @(negedge clk); reset_n=1;
         wait(dut.cart_probe_done);#1;
         if(!dut.layered_save_mode || rom_reads!=16) $fatal(1,"valid header not detected");
+        wait(dut.cart_gpio_initialized);#1;
+        if(gpio_enable || dut.cart_gpio_readable || gpio_writes!=1 || rumble_writes!=0)
+            $fatal(1,"GPIO startup or rumble inhibition failed");
         motor=1;
-        // Queue a save request in the middle of the upstream two-write rumble update.
-        wait(dut.wr_busy && dut.wr_cnt==65);
+        // Raw GPIO and save traffic share the same owner. Synthetic rumble
+        // must remain silent even while the controller has released the slot.
+        gpio_access(0,2,1,0);
+        if(!dut.cart_gpio_readable) $fatal(1,"acknowledged C8 enable not tracked");
+        gpio_access(1,2,0,1);
+        for(j=0;j<16;j=j+1) begin
+            gpio_access(0,1,j,0);
+            gpio_access(1,1,0,j);
+            gpio_input=4'(j^5);
+            gpio_access(0,0,4'(j^10),0);
+            expected_pins=(4'(j^10)&4'(j)) | (gpio_input&~4'(j));
+            gpio_access(1,0,0,{12'd0,expected_pins});
+        end
+        // A real RTC-style serial command and response, with a save access
+        // and a forced refresh between clock edges. No FPGA RTC emulation.
+        rtc_mode=1;command=8'h63;
+        gpio_access(0,1,7,0);
+        gpio_access(0,0,1,0);
+        gpio_access(0,0,5,0);
+        for(j=0;j<8;j=j+1) begin
+            gpio_access(0,0,4|(command[j]<<1),0);
+            gpio_access(0,0,5|(command[j]<<1),0);
+        end
+        gpio_access(0,0,4,0);
+        if(rtc_command!==command || rtc_command_bits!=8) $fatal(1,"RTC command corrupted");
+        gpio_access(0,1,5,0);
+        for(j=0;j<8;j=j+1) begin
+            gpio_access(0,0,5,0);
+            if(j==3) begin
+                dut.refresh_due=1;
+                save_access(0,17'h42,8'h99,0);
+                repeat(400) @(negedge clk);
+            end
+            gpio_access(1,0,0,5|(RTC_RESPONSE[j]<<1));
+            gpio_access(0,0,4,0);
+        end
+        gpio_access(0,0,0,0);rtc_mode=0;
+        // GPIO3 rumble is just another data bit; saving must preserve it.
+        gpio_access(0,1,15,0);gpio_access(0,0,13,0);
+        before_gpio=gpio_writes;
         save_access(0,17'h01234,8'h5A,0);
         save_access(1,17'h01234,0,8'h5A);
         // Back-to-back requests exercise deassert/reassert while CDC grant is stale.
@@ -140,17 +239,41 @@ module tb_layered_slot;
         if(save_writes!=before_saves) $fatal(1,"EEPROM touched SRAM/Flash");
         e_access(1,0,0);
         if(cs!==1) $fatal(1,"standalone EEPROM poll did not release CS");
-        wait(rumble_writes>before_rumble);
-        cfg=0;#1;
+        // Cross a real 14.1 ms refresh interval while GPIO is idle.
+        repeat(1100000) @(negedge clk74);
+        if(rumble_writes!=0 || gpio_writes!=before_gpio || gpio_data!=13 || gpio_dir!=15)
+            $fatal(1,"idle/save/EEPROM traffic corrupted GPIO state");
+        gpio_access(0,2,0,0);
+        if(dut.cart_gpio_readable) $fatal(1,"C8 disable not acknowledged");
+        // With cartridge saves enabled, hardware is forced on despite hw_cfg=0.
+        if(!dut.cart_hw_mode) $fatal(1,"cartridge saves did not force hardware");
+        // SD saves plus real GPIO: probing and raw GPIO must stay available.
+        cfg=0;hw_cfg=1;
+        @(negedge clk);restart=1;
+        repeat(20) @(negedge clk);restart=0;
+        wait(dut.cart_gpio_initialized);#1;
+        if(dut.layered_save_mode || !dut.cart_hw_mode) $fatal(1,"SD saves/GPIO selection coupled");
+        gpio_access(0,2,1,0);gpio_access(0,1,15,0);gpio_access(0,0,9,0);
+        gpio_access(1,0,0,9);
+        hw_cfg=0;repeat(5) @(negedge clk);
         if(dut.layered_save_mode) $fatal(1,"disabled mode not restored");
         @(negedge clk); restart=1;
         repeat(10) @(negedge clk);
         restart=0;
         repeat(5000) @(negedge clk);
-        if(rom_reads!=16 || dut.cart_slot_owner)
+        dut.refresh_due=1;
+        wait(dut.wr_busy && dut.wr_cnt==65);
+        if(rom_reads!=32 || dut.cart_slot_owner)
             $fatal(1,"disabled mode still probed or owned the cartridge bus");
-        $display("PASS: header + queued SRAM + Flash bank1 + EEPROM DMA/poll + concurrent upstream rumble");
+        // Probe failure must also restore the unchanged upstream rumble driver.
+        header_present=0;cfg=0;hw_cfg=1;restart=1;
+        repeat(20) @(negedge clk);restart=0;
+        wait(dut.cart_probe_done);#1;
+        if(dut.layered_save_mode || dut.cart_gpio_initialized) $fatal(1,"empty cart did not fall back");
+        before_rumble=rumble_writes;motor=1;dut.refresh_due=1;
+        wait(rumble_writes>before_rumble);
+        $display("PASS: raw 4-bit GPIO + RTC serial read + save coexistence + no periodic rumble + fallback");
         $finish;
     end
-    initial begin #3000000; $fatal(1,"shared slot test timeout"); end
+    initial begin #20000000; $fatal(1,"shared slot timeout: ROM=%0d GPIO W/R=%0d/%0d save=%0d rumble=%0d init=%b state=%d",rom_reads,gpio_writes,gpio_reads,save_writes,rumble_writes,dut.cart_gpio_initialized,dut.u_layered_cart.state); end
 endmodule

@@ -117,6 +117,26 @@
             "value": 0
           }
         ]
+      },
+      {
+        "name": "Peripheral Passthrough",
+        "id": 41,
+        "type": "list",
+        "enabled": true,
+        "address": "0x94",
+        "persist": true,
+        "writeonly": true,
+        "defaultval": 1,
+        "options": [
+          {
+            "name": "On",
+            "value": 1
+          },
+          {
+            "name": "Off",
+            "value": 0
+          }
+        ]
       }
     ],
     "messages": []
