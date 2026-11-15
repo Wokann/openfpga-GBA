@@ -43,6 +43,9 @@ module tb_layered_slot;
     integer flash_state=0, rumble_writes=0, save_writes=0, rom_reads=0, e_writes=0;
     reg header_present=1;
     reg ds_card=0;
+    reg [15:0] ds_pullup_mask=0;
+    reg ds_latched_ad1=0;
+    integer ds_ticks=0;
     reg [3:0] gpio_data=0,gpio_dir=0,gpio_input=0;
     reg gpio_enable=1; // warm cartridge: initialization must turn this off
     integer gpio_writes=0,gpio_reads=0;
@@ -72,7 +75,7 @@ module tb_layered_slot;
             end
         end
     end
-    wire [15:0] rom_word = ds_card ? (rom_addr[15:0] & 16'hFFFD) :
+    wire [15:0] rom_word = ds_card ? ((rom_addr[15:0] & 16'hFFFD) | ds_pullup_mask) :
         (rom_addr==24'h62 && gpio_enable) ? {12'd0,gpio_pins} :
         (rom_addr==24'h63 && gpio_enable) ? {12'd0,gpio_dir} :
         (rom_addr==24'h64 && gpio_enable) ? 16'h0001 :
@@ -82,6 +85,13 @@ module tb_layered_slot;
               (!cs && !rd && !e_active) ? rom_word[7:0] : 8'hzz;
     assign b1=(!cs2 && !rd && cs) ? ram[{bank,save_latch}] : 8'hzz;
     always @(posedge wr) begin
+        // The DS actuator observes AD1 on /WR rising, irrespective of /CS.
+        // Count actual external pin transitions, not just internal motor state.
+        if(ds_card && d3) begin
+            if(b3[1] !== 1'b0 && b3[1] !== 1'b1) $fatal(1,"DS AD1 is undriven on /WR rise");
+            if(b3[1] != ds_latched_ad1) ds_ticks=ds_ticks+1;
+            ds_latched_ad1=b3[1];
+        end
         if(!cs2) begin
             if(!d1 || !d2 || !d3 || !cs) $fatal(1,"save bus direction/select error");
             save_writes=save_writes+1;
@@ -168,7 +178,7 @@ module tb_layered_slot;
             @(negedge clk);
         end
     endtask
-    integer before_rumble,before_saves,before_gpio,j;
+    integer before_rumble,before_saves,before_gpio,before_ticks,j;
     reg [7:0] command;
     reg [3:0] expected_pins;
     initial begin
@@ -304,7 +314,7 @@ module tb_layered_slot;
         repeat(20) @(negedge clk);
         wait(!dut.cart_switch_hold);
         if(!dut.cart_boot_done || dut.cart_hw_mode) $fatal(1,"live off reset the game");
-        ds_card=1;hw_cfg=1;
+        ds_card=1;ds_pullup_mask=16'hFFF9;hw_cfg=1;
         repeat(20) @(negedge clk);
         wait(!dut.cart_switch_hold);
         if(!dut.cart_ds_mode || dut.cart_hw_mode || dut.layered_save_mode)
@@ -317,7 +327,14 @@ module tb_layered_slot;
         wait(rumble_writes>=before_rumble+2);
         if(!dut.cart_rumble || gpio_writes!=before_gpio || b0[7]!==0)
             $fatal(1,"DS motor depended on local GPIO or used physical GPIO/PHI");
+        before_ticks=ds_ticks;
+        repeat(400000) @(negedge clk74);
+        if(ds_ticks < before_ticks+2) $fatal(1,"DS motor-on did not produce periodic physical AD1 ticks");
         gpio_access(0,0,0,0);wait(!dut.sent_motor);
+        wait(!dut.wr_busy);
+        before_ticks=ds_ticks;
+        repeat(210000) @(negedge clk74);
+        if(ds_ticks!=before_ticks) $fatal(1,"DS motor-off kept ticking");
         // Do not cut an upstream rumble pulse when switching off.
         dut.refresh_due=1;wait(dut.wr_busy && dut.wr_cnt==65);hw_cfg=0;
         repeat(20) @(negedge clk);wait(!dut.cart_switch_hold);
@@ -348,9 +365,9 @@ module tb_layered_slot;
         wait(dut.cart_boot_done);#1;
         if(!dut.cart_ds_mode || dut.cart_hw_mode || dut.layered_save_mode)
             $fatal(1,"DS pak with forced hardware enabled physical saves");
-        $display("PASS: DS GPIO adapter + live switching + drain before reprobe + no game reset");
+        $display("PASS: DS GPIO adapter + physical AD1 ticks/stop + live switching + drain before reprobe + no game reset");
         $display("PASS: raw 4-bit GPIO + RTC serial read + save coexistence + no periodic rumble + fallback");
         $finish;
     end
-    initial begin #20000000; $fatal(1,"shared slot timeout: ROM=%0d GPIO W/R=%0d/%0d save=%0d rumble=%0d init=%b state=%d",rom_reads,gpio_writes,gpio_reads,save_writes,rumble_writes,dut.cart_gpio_initialized,dut.u_layered_cart.state); end
+    initial begin #40000000; $fatal(1,"shared slot timeout: ROM=%0d GPIO W/R=%0d/%0d save=%0d rumble=%0d init=%b state=%d",rom_reads,gpio_writes,gpio_reads,save_writes,rumble_writes,dut.cart_gpio_initialized,dut.u_layered_cart.state); end
 endmodule

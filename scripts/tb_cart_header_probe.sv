@@ -18,6 +18,14 @@ module tb_cart_header_probe;
             if (pattern==5) data={((16'h59+{13'd0,addr,1'b0}) & 16'hFFFD), ((16'h58+{13'd0,addr,1'b0}) & 16'hFFFD)};
             if (pattern==6 || pattern==7) data=32'hFFFDFFFD;
             if (pattern==7 && accesses==7) data=data^1;
+            // Official DS pak on Pocket: address bits and pulled-up lines mix.
+            if (pattern==8 || pattern==9 || pattern==10 || pattern==11) begin
+                data={((16'h59+{13'd0,addr,1'b0}) & 16'hFFFD), ((16'h58+{13'd0,addr,1'b0}) & 16'hFFFD)};
+                data=data | 32'hFFF9FFF9; // 58/59 -> FFF9, 5C/5D -> FFFD
+                if(pattern==9 && accesses==3) data=data^32'h00200020;
+                if(pattern==10 && accesses==2) data=data | 32'h00020002;
+                if(pattern==11 && addr==1) data=data & 32'hFFF7FFF7;
+            end
             if (pattern==3 && accesses==7) data=data^1;
             if (pattern!=4) ready=1;
             accesses=accesses+1;
@@ -30,7 +38,7 @@ module tb_cart_header_probe;
             reset_n=1; start=1;
             wait(done); #1;
             if (present !== expected) $fatal(1,"probe pattern %0d: present=%b",p,present);
-            if (ds_present !== (p==5 || p==6)) $fatal(1,"DS signature misclassified");
+            if (ds_present !== (p==5 || p==6 || p==8)) $fatal(1,"DS signature misclassified, pattern %0d",p);
             if (p!=4 && accesses!=8) $fatal(1,"expected eight DWORD reads");
             repeat(10) @(negedge clk);
             if (req) $fatal(1,"probe restarted without reset");
@@ -40,7 +48,8 @@ module tb_cart_header_probe;
         test_pattern(0,1); test_pattern(1,0); test_pattern(2,0);
         test_pattern(3,0); test_pattern(4,0);
         test_pattern(5,0); test_pattern(6,0); test_pattern(7,0);
-        $display("PASS: GBA header, empty/invalid/timeout, DS address/pullup signatures and mismatched DS");
+        test_pattern(8,0); test_pattern(9,0); test_pattern(10,0); test_pattern(11,1);
+        $display("PASS: GBA/empty/timeout, DS address/pullup/mixed FFF9-FFFD, unstable/malformed DS");
         $finish;
     end
     initial begin #100000; $fatal(1,"probe test timeout"); end

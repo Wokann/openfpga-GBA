@@ -21,11 +21,17 @@ module cart_header_probe #(
     reg [2:0] count;
     reg [31:0] words [0:3];
     reg [31:0] acc_or, acc_and;
-    reg header_matches, ds_address_match, ds_pullup_match;
+    reg header_matches, ds_bus_match;
+    reg [15:0] ds_float_high;
     // GBATEK DS Rumble Pak signature: AD1 low, other lines reflect the
-    // halfword address. Also accept pulled-up floating lines on this FPGA bus.
+    // halfword address. Pocket's floating lines can individually retain the
+    // address or pull high (e.g. FFF9/FFFD), not necessarily all behave alike.
+    // Infer a fixed high mask from address 58h, then verify every halfword
+    // against address | mask across both passes. AD1 must always be low.
     wire [15:0] ds_low = (16'h0058 + {13'd0, rd_addr, 1'b0}) & 16'hFFFD;
     wire [15:0] ds_high = (16'h0059 + {13'd0, rd_addr, 1'b0}) & 16'hFFFD;
+    wire [15:0] ds_first_mask = rd_data[15:0] & ~ds_low;
+    wire [15:0] ds_mask = count == 0 ? ds_first_mask : ds_float_high;
     localparam TIMER_BITS = TIMEOUT > 0 ? $clog2(TIMEOUT + 1) : 1;
     reg [TIMER_BITS-1:0] timer;
 
@@ -39,8 +45,8 @@ module cart_header_probe #(
             done <= 0;
             present <= 0;
             ds_present <= 0;
-            ds_address_match <= 1;
-            ds_pullup_match <= 1;
+            ds_bus_match <= 1;
+            ds_float_high <= 0;
             header_matches <= 1;
             acc_or <= 0;
             acc_and <= 32'hFFFFFFFF;
@@ -56,8 +62,10 @@ module cart_header_probe #(
                 WAIT_DATA: begin
                     if (rd_ready) begin
                         acc_or <= acc_or | rd_data;
-                        if (rd_data != {ds_high, ds_low}) ds_address_match <= 0;
-                        if (rd_data != 32'hFFFDFFFD) ds_pullup_match <= 0;
+                        if (count == 0) ds_float_high <= ds_first_mask;
+                        if (rd_data[1] || rd_data[17] ||
+                            rd_data != {(ds_high | ds_mask), (ds_low | ds_mask)})
+                            ds_bus_match <= 0;
                         acc_and <= acc_and & rd_data;
                         if (!count[2]) words[count[1:0]] <= rd_data;
                         else if (words[count[1:0]] != rd_data) header_matches <= 0;
@@ -76,8 +84,8 @@ module cart_header_probe #(
                 end
                 GAP: state <= ISSUE;
                 FINISH: begin
-                    ds_present <= header_matches && (ds_address_match || ds_pullup_match);
-                    present <= header_matches && !ds_address_match && !ds_pullup_match && acc_or != 0 && acc_and != 32'hFFFFFFFF;
+                    ds_present <= header_matches && ds_bus_match;
+                    present <= header_matches && !ds_bus_match && acc_or != 0 && acc_and != 32'hFFFFFFFF;
                     done <= 1;
                     state <= COMPLETE;
                 end
