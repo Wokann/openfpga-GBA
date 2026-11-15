@@ -664,14 +664,17 @@ begin
                            mem_bus_done <= '1';
                            state        <= IDLE;
                            if (gpio_cart_mode = '1') then
-                              -- ROM has no byte write lane. STRH/STR are the
-                              -- documented GPIO accesses; ignore STRB.
-                              if (acc_save /= ACCESS_8BIT and
-                                  ((unsigned(adr_save(24 downto 1)) >= 16#62# and unsigned(adr_save(24 downto 1)) <= 16#64#) or
-                                   (acc_save = ACCESS_32BIT and unsigned(adr_save(24 downto 2)) = 16#32#))) then
+                              -- Accept STRB like the local GPIO path. Translate it
+                              -- into one halfword bus cycle without a read/modify/write.
+                              if ((unsigned(adr_save(24 downto 1)) >= 16#62# and unsigned(adr_save(24 downto 1)) <= 16#64#) or
+                                  (acc_save = ACCESS_32BIT and unsigned(adr_save(24 downto 2)) = 16#32#)) then
                                  GPIO_ext_req <= '1';
                                  GPIO_ext_rnw <= '0';
-                                 GPIO_ext_din <= Dout_save(15 downto 0);
+                                 if (acc_save = ACCESS_8BIT) then
+                                    GPIO_ext_din <= x"00" & Dout_save(7 downto 0);
+                                 else
+                                    GPIO_ext_din <= Dout_save(15 downto 0);
+                                 end if;
                                  if (acc_save = ACCESS_32BIT) then
                                     gpio_cart_addr <= adr_save(3) & '0';
                                  else

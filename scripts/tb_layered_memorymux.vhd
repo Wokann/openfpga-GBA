@@ -133,6 +133,7 @@ begin
         end procedure;
         variable n, e, r : natural;
         variable base_addr, reg_value, data_value, dir_value : natural;
+        variable store_width : std_logic_vector(1 downto 0);
         variable expect_word, expect_read : unsigned(31 downto 0);
     begin
         wait for 40 ns;
@@ -163,12 +164,12 @@ begin
         assert ee_dma='0' and rdata(0)='1' severity failure;
         assert ee_requests=e+4 and bus_requests=n report "EEPROM used PSRAM path" severity failure;
         -- Write-only mode returns the SD ROM, even if the local simulator
-        -- thinks reads are enabled. STRB is ignored on the physical ROM port.
+        -- thinks reads are enabled. A GPIO STRB is one physical halfword write.
         gpio_readable<='1';special<='1';r:=rom_requests;e:=g_requests;
         access_bus(16#080000C4#,'1',0,ACCESS_16BIT);
         assert rom_requests>r and g_requests=e severity failure;
         access_bus(16#080000C8#,'0',1,ACCESS_8BIT);
-        assert g_requests=e and g_readable='0' severity failure;
+        assert g_requests=e+1 and g_readable='1' report "GPIO byte control write was dropped" severity failure;
         special<='0';
         access_bus(16#080000C8#,'0',1,ACCESS_16BIT);
         assert g_readable='1' severity failure;
@@ -206,6 +207,58 @@ begin
         access_bus(16#080000C8#,'0',1,ACCESS_16BIT);
         access_bus(16#080000C6#,'1',0,ACCESS_16BIT);
         assert rdata=x"00000007" and local_reads=0 report "SD saves disabled raw GPIO" severity failure;
+        -- A homebrew SD ROM has no database GPIO flag. With physical GPIO
+        -- selected, both states of the combined database/Force Quirk input
+        -- must deliver the same motor commands, without local GPIO writes.
+        for forced in 0 to 1 loop
+            if forced=0 then special<='0'; else special<='1'; end if;
+          for width in 0 to 1 loop
+            if width=0 then store_width:=ACCESS_8BIT; else store_width:=ACCESS_16BIT; end if;
+            e:=g_requests;
+            -- Original Pinball 1.2/1.3 patch sequence, also checked as STRH.
+            access_bus(16#080000C8#,'0',1,store_width);
+            access_bus(16#080000C6#,'0',8,store_width);
+            access_bus(16#080000C4#,'0',8,store_width);
+            access_bus(16#080000C4#,'1',0,ACCESS_16BIT);
+            assert rdata=x"00000008" and g_regs(1)=x"0008"
+                report "SD homebrew motor-on depends on Force Quirk" severity failure;
+            access_bus(16#080000C4#,'0',0,store_width);
+            access_bus(16#080000C4#,'1',0,ACCESS_16BIT);
+            assert rdata=x"00000000" and g_requests=e+6 and local_reads=0 and local_writes=0
+                report "SD homebrew motor-off leaked into local GPIO" severity failure;
+          end loop;
+        end loop;
+        -- STRB uses only the low source byte, even when its upper bits are
+        -- nonzero. Cover all six byte addresses and all ROM waitstate windows.
+        special<='0';
+        for window in 0 to 2 loop
+            base_addr:=16#08000000#+window*16#02000000#;
+            for offset in 0 to 5 loop
+                e:=g_requests;
+                access_bus(base_addr+16#C4#+offset,'0',16#12AB005B#,ACCESS_8BIT);
+                assert g_requests=e+1 and g_regs(offset/2)=x"005B"
+                    report "GPIO byte payload/address alias is incorrect" severity failure;
+            end loop;
+            -- STR rounds down to a word boundary; do not rotate write data.
+            for offset in 0 to 3 loop
+                e:=g_requests;
+                access_bus(base_addr+16#C4#+offset,'0',16#00340012#,ACCESS_32BIT);
+                assert g_requests=e+2 and g_regs(0)=x"0012" and g_regs(1)=x"0034"
+                    report "32-bit GPIO write alignment/split failed" severity failure;
+                e:=g_requests;
+                access_bus(base_addr+16#C8#+offset,'0',16#56780001#,ACCESS_32BIT);
+                assert g_requests=e+1 and g_regs(2)=x"0001"
+                    report "32-bit C8 write escaped into ordinary ROM" severity failure;
+            end loop;
+        end loop;
+        e:=g_requests;
+        access_bus(16#080000C2#,'0',8,ACCESS_8BIT);
+        access_bus(16#080000CA#,'0',8,ACCESS_8BIT);
+        access_bus(16#08001000#,'0',2,ACCESS_8BIT);
+        access_bus(16#09FE0000#,'0',16#D200#,ACCESS_16BIT);
+        assert g_requests=e and local_reads=0 and local_writes=0
+            report "ordinary ROM/flashcart commands leaked into GPIO" severity failure;
+        special<='1';
         tilt_mode<='1';n:=bus_requests;r:=sram_events;e:=ee_requests;
         access_bus(16#0E008000#,'0',16#55#,ACCESS_8BIT);
         assert last_address=x"8000" and last_write=x"55" severity failure;
