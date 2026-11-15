@@ -33,7 +33,7 @@ module tb_layered_slot;
     );
     // Model the external side of pin30's level translator. Upstream leaves
     // it disconnected while driving rumble, whereas the save master drives it.
-    wire cs2 = dut.cart_slot_owner ? pin30 : 1'b1;
+    wire cs2 = d30 === 1'b1 ? pin30 : 1'b1;
     wire cs=b0[4], rd=b0[5], wr=b0[6];
     reg [23:0] rom_addr;
     reg [15:0] save_latch;
@@ -44,8 +44,9 @@ module tb_layered_slot;
     reg header_present=1;
     reg ds_card=0;
     reg [15:0] ds_pullup_mask=0;
+    reg [15:0] ds_read_clear=0;
     reg ds_latched_ad1=0;
-    integer ds_ticks=0;
+    integer ds_ticks=0, ds_pulses=0;
     reg [3:0] gpio_data=0,gpio_dir=0,gpio_input=0;
     reg gpio_enable=1; // warm cartridge: initialization must turn this off
     integer gpio_writes=0,gpio_reads=0;
@@ -75,7 +76,7 @@ module tb_layered_slot;
             end
         end
     end
-    wire [15:0] rom_word = ds_card ? ((rom_addr[15:0] & 16'hFFFD) | ds_pullup_mask) :
+    wire [15:0] rom_word = ds_card ? (((rom_addr[15:0] & 16'hFFFD) | ds_pullup_mask) & ~ds_read_clear) :
         (rom_addr==24'h62 && gpio_enable) ? {12'd0,gpio_pins} :
         (rom_addr==24'h63 && gpio_enable) ? {12'd0,gpio_dir} :
         (rom_addr==24'h64 && gpio_enable) ? 16'h0001 :
@@ -85,6 +86,11 @@ module tb_layered_slot;
               (!cs && !rd && !e_active) ? rom_word[7:0] : 8'hzz;
     assign b1=(!cs2 && !rd && cs) ? ram[{bank,save_latch}] : 8'hzz;
     always @(posedge wr) begin
+        if(dut.wr_busy && dut.wr_ds_only && !dut.cart_slot_owner) begin
+            if(cs!==1'b1 || cs2!==1'b1 || rd!==1'b1 || !d3 || d30!==1'b1)
+                $fatal(1,"DS pulse selected GBA ROM/save or did not drive /CS2 high");
+            ds_pulses=ds_pulses+1;
+        end
         // The DS actuator observes AD1 on /WR rising, irrespective of /CS.
         // Count actual external pin transitions, not just internal motor state.
         if(ds_card && d3) begin
@@ -109,7 +115,7 @@ module tb_layered_slot;
         else if(!cs && dut.cart_slot_owner) begin
             if(!d1 || !d2 || !d3 || !cs2) $fatal(1,"GPIO write direction/CS2 error");
             gpio_writes=gpio_writes+1;
-            case(rom_addr)
+            if(!ds_card) case(rom_addr)
                 24'h62: begin
                     if(rtc_mode) begin
                         if(!b3[2] || !gpio_data[2]) begin
@@ -178,7 +184,7 @@ module tb_layered_slot;
             @(negedge clk);
         end
     endtask
-    integer before_rumble,before_saves,before_gpio,before_ticks,j;
+    integer before_rumble,before_rumble_writes,before_saves,before_gpio,before_ticks,j;
     reg [7:0] command;
     reg [3:0] expected_pins;
     initial begin
@@ -205,25 +211,28 @@ module tb_layered_slot;
         // A real RTC-style serial command and response, with a save access
         // and a forced refresh between clock edges. No FPGA RTC emulation.
         rtc_mode=1;command=8'h63;
-        gpio_access(0,1,7,0);
-        gpio_access(0,0,1,0);
-        gpio_access(0,0,5,0);
+        gpio_access(0,1,15,0);
+        gpio_access(0,0,9,0);
+        gpio_access(0,0,13,0);
         for(j=0;j<8;j=j+1) begin
-            gpio_access(0,0,4|(command[j]<<1),0);
-            gpio_access(0,0,5|(command[j]<<1),0);
+            gpio_access(0,0,12|(command[j]<<1),0);
+            gpio_access(0,0,13|(command[j]<<1),0);
         end
-        gpio_access(0,0,4,0);
+        gpio_access(0,0,12,0);
         if(rtc_command!==command || rtc_command_bits!=8) $fatal(1,"RTC command corrupted");
-        gpio_access(0,1,5,0);
+        gpio_access(0,1,13,0);
         for(j=0;j<8;j=j+1) begin
-            gpio_access(0,0,5,0);
+            gpio_access(0,0,13,0);
             if(j==3) begin
                 dut.refresh_due=1;
                 save_access(0,17'h42,8'h99,0);
-                repeat(400) @(negedge clk);
+                before_rumble=ds_pulses;before_gpio=gpio_writes;
+                repeat(210000) @(negedge clk74);
+                if(ds_pulses<=before_rumble || gpio_writes!=before_gpio || gpio_data!=13 || gpio_dir!=13)
+                    $fatal(1,"DS tick did not coexist with a paused RTC serial transfer");
             end
-            gpio_access(1,0,0,5|(RTC_RESPONSE[j]<<1));
-            gpio_access(0,0,4,0);
+            gpio_access(1,0,0,13|(RTC_RESPONSE[j]<<1));
+            gpio_access(0,0,12,0);
         end
         gpio_access(0,0,0,0);rtc_mode=0;
         // GPIO3 rumble is just another data bit; saving must preserve it.
@@ -262,8 +271,9 @@ module tb_layered_slot;
         if(cs!==1) $fatal(1,"standalone EEPROM poll did not release CS");
         // Cross a real 14.1 ms refresh interval while GPIO is idle.
         repeat(1100000) @(negedge clk74);
-        if(rumble_writes!=0 || gpio_writes!=before_gpio || gpio_data!=13 || gpio_dir!=15)
+        if(rumble_writes!=0 || gpio_writes!=before_gpio || gpio_data!=13 || gpio_dir!=15 || save_writes!=before_saves)
             $fatal(1,"idle/save/EEPROM traffic corrupted GPIO state");
+        if(ds_pulses==0) $fatal(1,"raw GPIO3 output did not also drive unselected DS pulses");
         gpio_access(0,2,0,0);
         if(dut.cart_gpio_readable) $fatal(1,"C8 disable not acknowledged");
         // With cartridge saves enabled, hardware is forced on despite hw_cfg=0.
@@ -320,23 +330,45 @@ module tb_layered_slot;
         if(!dut.cart_ds_mode || dut.cart_hw_mode || dut.layered_save_mode)
             $fatal(1,"DS pak routed as GBA saves/GPIO");
         before_gpio=gpio_writes;
-        gpio_access(0,2,1,0);gpio_access(0,1,8,0);gpio_access(0,0,8,0);
+        gpio_access(0,2,1,0);
+        gpio_access(0,0,8,0); // Input pin: does not turn on the upstream motor latch.
+        gpio_access(0,1,8,0);
+        repeat(100) @(negedge clk);
+        if(dut.hw_rumble) $fatal(1,"direction write revived an ignored input-mode motor write");
+        gpio_access(0,0,8,0);
         gpio_access(1,1,0,8);gpio_access(1,0,0,8);
-        wait(dut.sent_motor);
-        before_rumble=rumble_writes;dut.refresh_due=1;
-        wait(rumble_writes>=before_rumble+2);
+        before_rumble=ds_pulses;
+        wait(ds_pulses>before_rumble);
         if(!dut.cart_rumble || gpio_writes!=before_gpio || b0[7]!==0)
             $fatal(1,"DS motor depended on local GPIO or used physical GPIO/PHI");
         before_ticks=ds_ticks;
         repeat(400000) @(negedge clk74);
         if(ds_ticks < before_ticks+2) $fatal(1,"DS motor-on did not produce periodic physical AD1 ticks");
-        gpio_access(0,0,0,0);wait(!dut.sent_motor);
+        gpio_access(0,0,0,0);wait(!dut.cart_rumble_74);
         wait(!dut.wr_busy);
         before_ticks=ds_ticks;
         repeat(210000) @(negedge clk74);
         if(ds_ticks!=before_ticks) $fatal(1,"DS motor-off kept ticking");
+        // Raw GPIO is still a working DS rumble source when the bus signature
+        // is unrecognized. It must not need either cart_ds_mode or local Force.
+        hw_cfg=0;repeat(20) @(negedge clk);wait(!dut.cart_switch_hold);
+        ds_read_clear=16'h0008;hw_cfg=1;
+        repeat(20) @(negedge clk);wait(!dut.cart_switch_hold);
+        if(!dut.cart_hw_mode || dut.cart_ds_mode || motor)
+            $fatal(1,"unrecognized DS response did not exercise raw GPIO route");
+        gpio_access(0,2,1,0);gpio_access(0,1,8,0);gpio_access(0,0,8,0);
+        before_ticks=ds_ticks;before_gpio=gpio_writes;before_rumble_writes=rumble_writes;
+        repeat(400000) @(negedge clk74);
+        if(ds_ticks<before_ticks+2 || gpio_writes!=before_gpio || rumble_writes!=before_rumble_writes)
+            $fatal(1,"raw-route DS rumble needed identification or injected GBA writes");
+        gpio_access(0,1,0,0);wait(!dut.cart_rumble_74);wait(!dut.wr_busy);
+        before_ticks=ds_ticks;
+        repeat(210000) @(negedge clk74);
+        if(ds_ticks!=before_ticks) $fatal(1,"direction input did not stop raw-route DS rumble");
+        ds_read_clear=0;
         // Do not cut an upstream rumble pulse when switching off.
-        dut.refresh_due=1;wait(dut.wr_busy && dut.wr_cnt==65);hw_cfg=0;
+        gpio_access(0,1,8,0);gpio_access(0,0,8,0);
+        wait(dut.wr_busy && dut.wr_cnt==65);hw_cfg=0;
         repeat(20) @(negedge clk);wait(!dut.cart_switch_hold);
         if(dut.cart_ds_mode || !dut.cart_boot_done) $fatal(1,"DS live disable failed");
         // Delay acknowledgement to represent a busy CPU/DMA memory access.
@@ -365,9 +397,9 @@ module tb_layered_slot;
         wait(dut.cart_boot_done);#1;
         if(!dut.cart_ds_mode || dut.cart_hw_mode || dut.layered_save_mode)
             $fatal(1,"DS pak with forced hardware enabled physical saves");
-        $display("PASS: DS GPIO adapter + physical AD1 ticks/stop + live switching + drain before reprobe + no game reset");
-        $display("PASS: raw 4-bit GPIO + RTC serial read + save coexistence + no periodic rumble + fallback");
+        $display("PASS: DS AD1 ticks without DS identification/Force + inactive GBA chip selects + live switching");
+        $display("PASS: raw GPIO + RTC serial read during DS ticks + saves/EEPROM isolation + local fallback");
         $finish;
     end
-    initial begin #40000000; $fatal(1,"shared slot timeout: ROM=%0d GPIO W/R=%0d/%0d save=%0d rumble=%0d init=%b state=%d",rom_reads,gpio_writes,gpio_reads,save_writes,rumble_writes,dut.cart_gpio_initialized,dut.u_layered_cart.state); end
+    initial begin #50000000; $fatal(1,"shared slot timeout: ROM=%0d GPIO W/R=%0d/%0d save=%0d rumble=%0d init=%b state=%d",rom_reads,gpio_writes,gpio_reads,save_writes,rumble_writes,dut.cart_gpio_initialized,dut.u_layered_cart.state); end
 endmodule

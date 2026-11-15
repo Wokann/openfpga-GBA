@@ -326,33 +326,38 @@ always @(posedge clk_sys) begin
         endcase
     end
 end
-// DS option paks have no GBA GPIO. Adapt the same raw GPIO request interface
-// to GPIO3 motor state, consumed by the existing AD1 pulse driver. This bypasses
-// ROM quirks/Force without enabling the local RTC or changing save routing.
+// Observe the same GPIO3 commands as the upstream local rumble handler on
+// EVERY active hardware route. DS signature detection is not a rumble gate.
+// Known DS paks additionally expose these latches as their GPIO readback.
 wire [15:0] cart_gpio_phys_dout;
 wire cart_gpio_phys_done, cart_gpio_phys_readable;
-reg ds_gpio_direction, ds_gpio_data, ds_gpio_readable, ds_gpio_done;
+reg hw_rumble_direction, hw_rumble, ds_gpio_readable, ds_gpio_done;
 reg [15:0] ds_gpio_dout;
 always @(posedge clk_sys) begin
     ds_gpio_done <= 0;
     if (!pll_core_locked || core_reset_s || cart_probe_reset) begin
-        ds_gpio_direction <= 0;
-        ds_gpio_data <= 0;
+        hw_rumble_direction <= 0;
+        hw_rumble <= 0;
         ds_gpio_readable <= 0;
         ds_gpio_dout <= 0;
-    end else if (cart_ds_mode && cart_gpio_req && cart_gpio_initialized) begin
-        ds_gpio_done <= 1;
+    end else if (cart_gpio_mode && cart_gpio_req && cart_gpio_initialized) begin
+        ds_gpio_done <= cart_ds_mode;
         if (cart_gpio_rnw) begin
             case (cart_gpio_addr)
-                0: ds_gpio_dout <= {12'd0, ds_gpio_data && ds_gpio_direction, 3'd0};
-                1: ds_gpio_dout <= {12'd0, ds_gpio_direction, 3'd0};
+                0: ds_gpio_dout <= {12'd0, hw_rumble, 3'd0};
+                1: ds_gpio_dout <= {12'd0, hw_rumble_direction, 3'd0};
                 2: ds_gpio_dout <= {15'd0, ds_gpio_readable};
                 default: ds_gpio_dout <= 0;
             endcase
         end else begin
             case (cart_gpio_addr)
-                0: ds_gpio_data <= cart_gpio_din[3];
-                1: ds_gpio_direction <= cart_gpio_din[3];
+                // Match gba_gpioRTCSolarGyro: C4 only sets rumble when
+                // GPIO3 is output; C6 switching it to input stops rumble.
+                0: if (hw_rumble_direction) hw_rumble <= cart_gpio_din[3];
+                1: begin
+                    hw_rumble_direction <= cart_gpio_din[3];
+                    if (!cart_gpio_din[3]) hw_rumble <= 0;
+                end
                 2: ds_gpio_readable <= cart_gpio_din[0];
                 default: ;
             endcase
@@ -362,12 +367,16 @@ end
 assign cart_gpio_dout = cart_ds_mode ? ds_gpio_dout : cart_gpio_phys_dout;
 assign cart_gpio_done = cart_ds_mode ? ds_gpio_done : cart_gpio_phys_done;
 assign cart_gpio_readable = cart_ds_mode ? ds_gpio_readable : cart_gpio_phys_readable;
-// Allow the upstream rumble writer only in fallback, never while probing
-// or between real GPIO transactions. Start inhibited at FPGA power-on.
+// Full upstream GPIO writes remain fallback-only. Hardware mode uses just
+// AD1 /WR pulses with BOTH GBA chip selects inactive, between transactions.
 reg [2:0] fallback_rumble_sync = 3'b000;
-always @(posedge clk_74a)
+reg [2:0] hw_rumble_sync = 3'b000;
+always @(posedge clk_74a) begin
     fallback_rumble_sync <= {fallback_rumble_sync[1:0],
-        cart_route_state == CART_READY && !cart_switch_hold && !cart_hw_mode};
+        cart_route_state == CART_READY && !cart_switch_hold && !cart_gpio_mode};
+    hw_rumble_sync <= {hw_rumble_sync[1:0],
+        cart_route_state == CART_READY && !cart_switch_hold && cart_gpio_mode};
+end
 wire cart_request_sys, cart_request_74, cart_grant_sys;
 wire cart_bank1_dir, cart_bank2_dir, cart_bank3_dir;
 // The physical mux changes only after the previous rumble transaction ends.
@@ -434,7 +443,7 @@ gba_cart_controller #(.ROM_WAIT(40), .ADDR_SETUP(16)) u_layered_cart (
 // window (never EEPROM, which sits at A23+).
 
 wire local_rumble;                   // upstream local GPIO, clk_sys domain
-wire cart_rumble = cart_ds_mode ? (ds_gpio_data && ds_gpio_direction) : local_rumble;
+wire cart_rumble = cart_gpio_mode ? hw_rumble : local_rumble;
 wire cart_rumble_74;                 // synced to clk_74a
 synch_3 cart_rumble_sync(.i(cart_rumble), .o(cart_rumble_74), .clk(clk_74a), .rise(), .fall());
 
@@ -470,6 +479,7 @@ reg [19:0] rumble_refresh = 20'd0;   // 2^20 clk = 14.1 ms
 reg        refresh_due    = 1'b1;    // set up the cart once after config
 reg        wr_busy        = 1'b0;
 reg        wr_data_phase  = 1'b0;    // 0 = direction write, 1 = data write
+reg        wr_ds_only     = 1'b0;    // no /CS or /CS2 selection in hardware mode
 reg [6:0]  wr_cnt         = 7'd0;
 reg        sent_motor     = 1'b0;
 reg        sent_ad1       = 1'b0;
@@ -489,18 +499,21 @@ always @(posedge clk_74a) begin
     if (!wr_busy) cart_slot_owner <= cart_request_74;
 
     if (!wr_busy) begin
-        if (fallback_rumble_sync[2] && !cart_slot_owner && !cart_request_74 &&
-            (refresh_due || sent_ad1 != rumble_ad1 || sent_motor != cart_rumble_74)) begin
+        if (!cart_slot_owner && !cart_request_74 &&
+            ((fallback_rumble_sync[2] &&
+              (refresh_due || sent_ad1 != rumble_ad1 || sent_motor != cart_rumble_74)) ||
+             (hw_rumble_sync[2] && cart_rumble_74 && sent_ad1 != rumble_ad1))) begin
             refresh_due   <= 1'b0;
             sent_ad1      <= rumble_ad1;
             sent_motor    <= cart_rumble_74;
             wr_busy       <= 1'b1;
+            wr_ds_only    <= hw_rumble_sync[2];
             wr_data_phase <= 1'b0;
             wr_cnt        <= 7'd0;
         end
     end else if (wr_cnt == 7'd119) begin
         wr_cnt <= 7'd0;
-        if (wr_data_phase) wr_busy <= 1'b0;
+        if (wr_data_phase || wr_ds_only) wr_busy <= 1'b0;
         wr_data_phase <= ~wr_data_phase;
     end else begin
         wr_cnt <= wr_cnt + 7'd1;
@@ -508,8 +521,9 @@ always @(posedge clk_74a) begin
 
     // Registered pin outputs. Between writes AD keeps the last data value.
     if (wr_busy) begin
-        rumble_ad   <= (wr_cnt < 7'd40) ? wr_addr : wr_data;
-        rumble_cs_n <= ~(wr_cnt >= 7'd20 && wr_cnt < 7'd100);
+        rumble_ad   <= wr_ds_only ? {14'd0, sent_ad1, 1'b0} :
+                      (wr_cnt < 7'd40) ? wr_addr : wr_data;
+        rumble_cs_n <= wr_ds_only || !(wr_cnt >= 7'd20 && wr_cnt < 7'd100);
         rumble_wr_n <= ~(wr_cnt >= 7'd60 && wr_cnt < 7'd80);
     end else begin
         rumble_cs_n <= 1'b1;
@@ -527,8 +541,11 @@ assign cart_tran_bank1_dir = cart_slot_owner ? cart_bank1_dir : 1'b1;
 assign cart_tran_bank0[7]   = cart_hw_mode ? cart_phi : 1'b0;
 assign cart_tran_bank0[6:4] = cart_slot_owner ? 3'bzzz : {rumble_wr_n, 1'b1, rumble_cs_n};
 assign cart_tran_bank0_dir = 1'b1;
-assign cart_tran_pin30 = cart_slot_owner ? 1'bz : 1'b0;                      // /CS2: left to Pocket hardware (template default)
-assign cart_tran_pin30_dir = cart_slot_owner ? 1'b1 : 1'bz;
+// Keep /CS2 inactive throughout an unselected AD1 pulse, including when a
+// mode change arrives during the pulse. Preserve upstream idle behavior.
+wire rumble_cs2_inactive = hw_rumble_sync[2] || (wr_busy && wr_ds_only);
+assign cart_tran_pin30 = cart_slot_owner ? 1'bz : rumble_cs2_inactive ? 1'b1 : 1'b0;
+assign cart_tran_pin30_dir = (cart_slot_owner || rumble_cs2_inactive) ? 1'b1 : 1'bz;
 assign cart_pin30_pwroff_reset = 1'b0;
 assign cart_tran_pin31 = 1'bz;
 assign cart_tran_pin31_dir = 1'b0;
