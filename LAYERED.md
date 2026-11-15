@@ -1,4 +1,4 @@
-# mincer_ray-AGBLayered：SD ROM 与实体卡带存档、外设
+# GBA-Layered：SD ROM 与实体卡带存档、外设
 
 原作者 mincer_ray；Wokann 基于 AI 生成并添加卡带硬件直通、卡带存档读取与写入功能。
 
@@ -124,7 +124,7 @@ DS 卡不被当成 GBA 存档卡，也不启用 PHI、卡槽 IRQ 或倾斜传感
 实体 RTC；回退时继续使用上游 `.rtc` 加载／写回。
 
 安装时复制完整包的 `Cores/`、`Platforms/`、`Assets/` 到 SD 卡。
-核心显示名为 `mincer_ray-AGBLayered`，目录为 `/Cores/mincer_ray.AGBLayered/`，遵循固件要求的 `作者.核心名` 格式。
+核心显示名为 `GBA-Layered`，目录为 `/Cores/mincer_ray_&_Wokann.GBA-Layered/`，遵循固件要求的 `作者.核心名` 格式。
 ROM 和普通存档目录仍是 `/Assets/gba/common/` 与 `/Saves/gba/common/`；核心菜单设置及 Memories 归属新的核心标识。
 
 ## 源码组织

@@ -1,4 +1,4 @@
-# mincer_ray-AGBLayered for Analogue Pocket
+# GBA-Layered for Analogue Pocket
 
 Original Pocket port by **mincer_ray**, based on the [MiSTer GBA core](https://github.com/MiSTer-devel/GBA_MiSTer).
 **Wokann** adds **AI-generated cartridge hardware passthrough and cartridge save reading/writing features**.
@@ -62,7 +62,7 @@ Install this fork from the successful `layered` Actions run in this repository:
 2. Copy the 3 folders `Cores/`, `Platforms/`, `Assets/`  to your SD card
    - **macOS users:** Note: macOS Finder replaces folders instead of merging them so do it all manually and be careful.
 3. Place your ROMs and `gba_bios.bin` in `/Assets/gba/common/`
-4. Select `AGBLayered` by `mincer_ray`. Its install folder is `/Cores/mincer_ray.AGBLayered/`: Pocket requires the folder to exactly match `metadata.author + "." + metadata.shortname`. The project title remains `mincer_ray-AGBLayered`; the description and `info.txt` credit both mincer_ray and Wokann. Existing `/Saves/gba/common/` files remain shared; core settings and Memories belong to the new core identity.
+4. Select `GBA-Layered` by `mincer_ray_&_Wokann`. Its install folder is `/Cores/mincer_ray_&_Wokann.GBA-Layered/`: Pocket requires the folder to exactly match `metadata.author + "." + metadata.shortname`. The project title remains `GBA-Layered`; the description and `info.txt` credit both mincer_ray and Wokann. Existing `/Saves/gba/common/` files remain shared; core settings and Memories belong to the new core identity.
 
 The following sections describe inherited upstream features. Force Quirk is unnecessary for the Layered physical peripheral route.
 

@@ -1,4 +1,4 @@
-mincer_ray-AGBLayered
+GBA-Layered
 
 Original Pocket port by mincer_ray, based on GBA_MiSTer by its contributors.
 Wokann: AI-generated cartridge hardware passthrough and cartridge save reading/writing features.

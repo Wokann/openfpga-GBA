@@ -26,7 +26,7 @@ src/fpga/apf/build_id.mif
 
 # Build outputs
 bitstream.rbf_r
-pkg/Cores/mincer_ray.AGBLayered/bitstream.rbf_r
+pkg/Cores/mincer_ray_&_Wokann.GBA-Layered/bitstream.rbf_r
 build_output/
 test_results.txt
 

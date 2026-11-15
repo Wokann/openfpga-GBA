@@ -32,7 +32,7 @@ jobs:
       - name: Bump version
         id: version
         run: |
-          CURRENT=$(jq -r '.core.metadata.version' pkg/Cores/mincer_ray.AGBLayered/core.json)
+          CURRENT=$(jq -r '.core.metadata.version' 'pkg/Cores/mincer_ray_&_Wokann.GBA-Layered/core.json')
           IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
           case "${{ inputs.bump }}" in
             major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
@@ -40,8 +40,8 @@ jobs:
             patch) PATCH=$((PATCH + 1)) ;;
           esac
           NEW="${MAJOR}.${MINOR}.${PATCH}"
-          jq --arg v "$NEW" '.core.metadata.version = $v' pkg/Cores/mincer_ray.AGBLayered/core.json > tmp.json && mv tmp.json pkg/Cores/mincer_ray.AGBLayered/core.json
-          jq --arg d "$(date -u +%Y-%m-%d)" '.core.metadata.date_release = $d' pkg/Cores/mincer_ray.AGBLayered/core.json > tmp.json && mv tmp.json pkg/Cores/mincer_ray.AGBLayered/core.json
+          jq --arg v "$NEW" '.core.metadata.version = $v' 'pkg/Cores/mincer_ray_&_Wokann.GBA-Layered/core.json' > tmp.json && mv tmp.json 'pkg/Cores/mincer_ray_&_Wokann.GBA-Layered/core.json'
+          jq --arg d "$(date -u +%Y-%m-%d)" '.core.metadata.date_release = $d' 'pkg/Cores/mincer_ray_&_Wokann.GBA-Layered/core.json' > tmp.json && mv tmp.json 'pkg/Cores/mincer_ray_&_Wokann.GBA-Layered/core.json'
           echo "version=$NEW" >> "$GITHUB_OUTPUT"
           echo "Bumped $CURRENT → $NEW"
 
@@ -49,13 +49,13 @@ jobs:
         run: docker run --rm -v ${{ github.workspace }}:/build -w /build raetro/quartus:21.1 quartus_sh -t generate.tcl
 
       - name: Reverse bitstream
-        run: python3 scripts/reverse_bitstream.py src/fpga/build/output_files/ap_core.rbf pkg/Cores/mincer_ray.AGBLayered/bitstream.rbf_r
+        run: python3 scripts/reverse_bitstream.py src/fpga/build/output_files/ap_core.rbf 'pkg/Cores/mincer_ray_&_Wokann.GBA-Layered/bitstream.rbf_r'
 
       - name: Commit version bump
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add pkg/Cores/mincer_ray.AGBLayered/core.json
+          git add 'pkg/Cores/mincer_ray_&_Wokann.GBA-Layered/core.json'
           git commit -m "release v${{ steps.version.outputs.version }}"
           git tag "v${{ steps.version.outputs.version }}"
           git push origin HEAD --tags
@@ -63,14 +63,14 @@ jobs:
       - name: Package release zip
         run: |
           python3 scripts/check_core_package.py --require-bitstream
-          cd pkg && zip -r ../mincer_ray.AGBLayered_${{ steps.version.outputs.version }}.zip .
+          cd pkg && zip -r ../GBA-Layered_${{ steps.version.outputs.version }}.zip .
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ steps.version.outputs.version }}
           name: v${{ steps.version.outputs.version }}
-          files: mincer_ray.AGBLayered_${{ steps.version.outputs.version }}.zip
+          files: GBA-Layered_${{ steps.version.outputs.version }}.zip
           generate_release_notes: true
 
       - name: Extract timing closure failures
