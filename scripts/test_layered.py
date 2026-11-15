@@ -31,7 +31,7 @@ def slot_fixture():
 module slot_fixture (
     input wire clk_sys, clk_74a, pll_core_locked, core_reset_s,
     input wire reset_n_s, dataslot_allcomplete_s, cfg, hw_cfg, motor,
-    input wire tilt_game, phi_source,
+    input wire tilt_game, phi_source, switch_idle,
     input wire save_req, save_rnw, input wire [16:0] save_addr,
     input wire [7:0] save_din,
     input wire e_req, e_rnw, e_din, e_dma,
@@ -51,7 +51,8 @@ wire [25:0] bus_out_Adr = {9'd0,save_addr};
 assign cart_phi = cart_hw_mode ? phi_source : 1'b0;
 synch_3 hw_cfg_sync(.i(hw_cfg), .o(cart_hw_cfg_s), .clk(clk_sys), .rise(), .fall());
 synch_3 cfg_sync(.i(cfg), .o(layered_cfg_s), .clk(clk_sys), .rise(), .fall());
-assign cart_rumble = motor;
+assign cart_switch_idle = switch_idle;
+assign local_rumble = motor;
 assign cart_gpio_req = g_req;
 assign cart_gpio_rnw = g_rnw;
 assign cart_gpio_addr = g_addr;

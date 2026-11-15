@@ -1,8 +1,14 @@
-# GBA for Analogue Pocket
+# mincer_ray-AGBLayered for Analogue Pocket
 
-[![Latest Release](https://img.shields.io/github/v/tag/mincer-ray/openfpga-GBA?label=latest)](https://github.com/mincer-ray/openfpga-GBA/releases/latest) [![Downloads](https://img.shields.io/github/downloads/mincer-ray/openfpga-GBA/total)](https://github.com/mincer-ray/openfpga-GBA/releases) [![Platform](https://img.shields.io/badge/platform-Analogue%20Pocket-blue)](https://openfpga-library.github.io/analogue-pocket/)
+Original Pocket port by **mincer_ray**, based on the [MiSTer GBA core](https://github.com/MiSTer-devel/GBA_MiSTer).
+**Wokann** adds **AI-generated cartridge hardware passthrough and cartridge save reading/writing features**.
 
-LLM assisted port of [MiSTer GBA core](https://github.com/MiSTer-devel/GBA_MiSTer)
+原作者：mincer_ray；Wokann 基于 AI 生成并添加卡带硬件直通、卡带存档读取与写入功能。
+
+This Layered fork runs ROMs from SD while independently routing saves and peripherals to the cartridge slot.
+Peripheral Passthrough supports raw GBA GPIO and standard DS Rumble Pak adaptation without ROM ID or Force Quirk checks, including EZ 3-in-1 / EZODE rumble translation.
+The peripheral switch applies live; changing Cartridge Saves still restarts the game. Force Quirk remains available for upstream local emulation.
+See [LAYERED.md](LAYERED.md) for setup, compatibility boundaries and simulation coverage.
 
 ## Features
 
@@ -50,12 +56,15 @@ Note: MiSTer core has an accuracy branch! A few of those changes have made it in
 
 ## Installation
 
-The core should be available on pocket manager apps, or you can install manually:
+Install this fork from the successful `layered` Actions run in this repository:
 
-1. Download the latest release
+1. Download `package-layered`, then extract the contained core package ZIP
 2. Copy the 3 folders `Cores/`, `Platforms/`, `Assets/`  to your SD card
    - **macOS users:** Note: macOS Finder replaces folders instead of merging them so do it all manually and be careful.
 3. Place your ROMs and `gba_bios.bin` in `/Assets/gba/common/`
+4. Select `mincer_ray-AGBLayered`. Its install folder is `/Cores/mincer_ray.AGBLayered/` (the platform requires `Author.Core` folder names). Existing `/Saves/gba/common/` files remain shared; core settings and Memories belong to the new core identity.
+
+The following sections describe inherited upstream features. Force Quirk is unnecessary for the Layered physical peripheral route.
 
 ## Known Issues
 

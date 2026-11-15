@@ -58,6 +58,8 @@ entity gba_top is
       GPIO_ext_readable    : in     std_logic := '0';
       save_cart_mode        : in     std_logic := '0';
       gpio_cart_mode        : in     std_logic := '0';
+      cart_switch_hold      : in     std_logic := '0';
+      cart_switch_idle      : out    std_logic;
       tilt_cart_mode        : in     std_logic := '0';
       Cart_IRQ_in           : in     std_logic := '0';
       Cart_PHI_out          : out    std_logic;
@@ -682,6 +684,8 @@ begin
       EEPROM_ext_done      => EEPROM_ext_done_in,
       save_cart_mode       => save_cart_mode,
       gpio_cart_mode       => gpio_cart_mode,
+      cart_switch_hold     => cart_switch_hold,
+      cart_switch_idle     => cart_switch_idle,
       tilt_cart_mode       => tilt_cart_mode,
       GPIO_ext_req         => GPIO_ext_req,
       GPIO_ext_addr        => GPIO_ext_addr,

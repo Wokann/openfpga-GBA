@@ -124,6 +124,8 @@ entity gba_memorymux is
       -- Physical saves bypass Flash/EEPROM emulation.
       save_cart_mode       : in     std_logic := '0';
       gpio_cart_mode       : in     std_logic := '0';
+      cart_switch_hold     : in     std_logic := '0';
+      cart_switch_idle     : out    std_logic;
       tilt_cart_mode       : in     std_logic := '0';
       EEPROM_ext_req       : out    std_logic := '0';
       EEPROM_ext_rnw       : out    std_logic := '0';
@@ -167,6 +169,9 @@ architecture arch of gba_memorymux is
       READ_GPIO,
       GPIO_CART_READ,
       GPIO_CART_WRITE,
+      EZ_DECODE,
+      EZ_RUMBLE_DIR,
+      EZ_RUMBLE_DATA,
       GPIO_CART_ROM,
       GPIO_CART_LATCH,
 
@@ -191,6 +196,14 @@ architecture arch of gba_memorymux is
    );
    signal state : tState := IDLE;
    signal gpio_sample : std_logic_vector(31 downto 0);
+   -- EZ command compatibility is active only on the cartridge hardware route.
+   -- Track output latches, not pin readback, to preserve RTC on GPIO0..2.
+   signal gpio_data_shadow, gpio_dir_shadow : std_logic_vector(3 downto 0) := (others => '0');
+   signal gpio_write_data : std_logic_vector(15 downto 0);
+   signal gpio_read_not_write : std_logic;
+   signal ez_step : integer range 0 to 5 := 0;
+   signal ez_command : std_logic_vector(15 downto 0);
+   signal ez_ode_enabled, ez_motor : std_logic := '0';
    signal gpio_cart_addr : std_logic_vector(1 downto 0);
    signal tilt_cart_access : std_logic;
    
@@ -295,7 +308,10 @@ architecture arch of gba_memorymux is
    
 begin
 
+   cart_switch_idle <= '1' when state = IDLE or state = ADDR_DECODE else '0';
    GPIO_ext_addr <= gpio_cart_addr;
+   GPIO_ext_din <= gpio_write_data;
+   GPIO_ext_rnw <= gpio_read_not_write;
    tilt_cart_access <= '1' when tilt_cart_mode = '1' and
       unsigned(adr_save(15 downto 8)) >= 16#80# and unsigned(adr_save(15 downto 8)) <= 16#85# and
       adr_save(7 downto 0) = x"00" else '0';
@@ -400,6 +416,8 @@ begin
    process (clk100)
       variable palette_we : std_logic_vector(3 downto 0);
       variable VRAM_be    : std_logic_vector(3 downto 0);
+      variable ez_update : boolean;
+      variable ez_value : std_logic;
 
    begin
       if rising_edge(clk100) then
@@ -473,6 +491,17 @@ begin
          GPIO_writeEna   <= '0';
          EEPROM_ext_req <= '0';
          GPIO_ext_req <= '0';
+         ez_update := false;
+         ez_value := '0';
+         if (reset = '1' or gpio_cart_mode = '0') then
+            ez_step <= 0;
+            ez_ode_enabled <= '0';
+            gpio_data_shadow <= (others => '0');
+            gpio_dir_shadow <= (others => '0');
+         elsif (GPIO_ext_done = '1' and gpio_read_not_write = '0') then
+            if (gpio_cart_addr = "00") then gpio_data_shadow <= gpio_write_data(3 downto 0); end if;
+            if (gpio_cart_addr = "01") then gpio_dir_shadow <= gpio_write_data(3 downto 0); end if;
+         end if;
          
          mem_bus_done <= '0';
          mem_bus_unread  <= '0';
@@ -505,6 +534,7 @@ begin
 
             -- Pipeline stage: decode registered address to break combinational path
             when ADDR_DECODE =>
+               if (cart_switch_hold = '0') then
 
                if (rnw_save = '1') then  -- read
 
@@ -572,7 +602,7 @@ begin
                            if (gpio_cart_mode = '1' and GPIO_ext_readable = '1' and
                                ((unsigned(adr_save(24 downto 1)) >= 16#62# and unsigned(adr_save(24 downto 1)) <= 16#64#) or
                                 (acc_save = ACCESS_32BIT and unsigned(adr_save(24 downto 2)) = 16#32#))) then
-                              GPIO_ext_rnw <= '1';
+                              gpio_read_not_write <= '1';
                               rotate_data <= (others => '0');
                               gpio_sample <= (others => '0');
                               if (acc_save = ACCESS_32BIT) then
@@ -669,11 +699,11 @@ begin
                               if ((unsigned(adr_save(24 downto 1)) >= 16#62# and unsigned(adr_save(24 downto 1)) <= 16#64#) or
                                   (acc_save = ACCESS_32BIT and unsigned(adr_save(24 downto 2)) = 16#32#)) then
                                  GPIO_ext_req <= '1';
-                                 GPIO_ext_rnw <= '0';
+                                 gpio_read_not_write <= '0';
                                  if (acc_save = ACCESS_8BIT) then
-                                    GPIO_ext_din <= x"00" & Dout_save(7 downto 0);
+                                    gpio_write_data <= x"00" & Dout_save(7 downto 0);
                                  else
-                                    GPIO_ext_din <= Dout_save(15 downto 0);
+                                    gpio_write_data <= Dout_save(15 downto 0);
                                  end if;
                                  if (acc_save = ACCESS_32BIT) then
                                     gpio_cart_addr <= adr_save(3) & '0';
@@ -682,6 +712,11 @@ begin
                                  end if;
                                  mem_bus_done <= '0';
                                  state <= GPIO_CART_WRITE;
+                                 ez_step <= 0;
+                              else
+                                 -- Keep the extended command decoder off the GPIO path.
+                                 mem_bus_done <= '0';
+                                 state <= EZ_DECODE;
                               end if;
                            elsif (adr_save(27 downto 24) = x"8" and specialmodule = '1') then
                               if (unsigned(adr_save) >= 16#80000C4# and unsigned(adr_save) <= 16#80000C8#) then
@@ -712,7 +747,8 @@ begin
                   end if;
 
                end if;
-               
+               end if;
+
             when READPAK_CACHE =>
                if (sdram_buf_hit_16 = '1') then
                   mem_bus_done <= '1';
@@ -963,6 +999,70 @@ begin
                mem_bus_unread <= unread_next;
                state <= IDLE;
                
+            when EZ_DECODE =>
+               mem_bus_done <= '1';
+               state <= IDLE;
+               ez_step <= 0;
+               -- Exact unlock / rumble register / commit sequence. An isolated
+               -- write to the EZ motor port or other flashcart commands is inert.
+               if (acc_save /= ACCESS_8BIT and adr_save(27 downto 0) = x"9FE0000" and Dout_save(15 downto 0) = x"D200") then
+                  ez_step <= 1;
+               elsif (acc_save /= ACCESS_8BIT) then
+                  case ez_step is
+                     when 1 =>
+                        if (adr_save(27 downto 0) = x"8000000" and Dout_save(15 downto 0) = x"1500") then ez_step <= 2; end if;
+                     when 2 =>
+                        if (adr_save(27 downto 0) = x"8020000" and Dout_save(15 downto 0) = x"D200") then ez_step <= 3; end if;
+                     when 3 =>
+                        if (adr_save(27 downto 0) = x"8040000" and Dout_save(15 downto 0) = x"1500") then ez_step <= 4; end if;
+                     when 4 =>
+                        if (adr_save(27 downto 0) = x"9E20000") then
+                           ez_command <= Dout_save(15 downto 0);
+                           ez_step <= 5;
+                        end if;
+                     when 5 =>
+                        if (adr_save(27 downto 0) = x"9FC0000" and Dout_save(15 downto 0) = x"1500") then
+                           case ez_command is
+                              when x"00F0" | x"00F1" | x"00F2" => ez_ode_enabled <= '1';
+                              when x"0000" | x"0008" =>
+                                 ez_ode_enabled <= '0'; ez_update := true;
+                              when x"0001" | x"0003" | x"0007" =>
+                                 ez_ode_enabled <= '0'; ez_update := true; ez_value := '1';
+                              when others => null;
+                           end case;
+                        end if;
+                     when others => null;
+                  end case;
+               end if;
+               -- EZODE enables this port once, then uses bit 1 for each event.
+               if (ez_ode_enabled = '1' and adr_save(27 downto 0) = x"8001000") then
+                  ez_update := true;
+                  ez_value := Dout_save(1);
+               end if;
+               if ez_update then
+                  ez_motor <= ez_value;
+                  GPIO_ext_req <= '1';
+                  gpio_read_not_write <= '0';
+                  gpio_cart_addr <= "01";
+                  gpio_write_data <= x"000" & '1' & gpio_dir_shadow(2 downto 0);
+                  mem_bus_done <= '0';
+                  state <= EZ_RUMBLE_DIR;
+               end if;
+
+            when EZ_RUMBLE_DIR =>
+               if (GPIO_ext_done = '1') then
+                  GPIO_ext_req <= '1';
+                  gpio_cart_addr <= "00";
+                  gpio_write_data <= x"000" & ez_motor & gpio_data_shadow(2 downto 0);
+                  state <= EZ_RUMBLE_DATA;
+               end if;
+
+            when EZ_RUMBLE_DATA =>
+               if (GPIO_ext_done = '1') then
+                  mem_bus_done <= '1';
+                  state <= IDLE;
+               end if;
+
             when GPIO_CART_ROM =>
                -- The upstream cache reports hits itself; misses complete
                -- directly on the SDRAM return (then fill the cache).
@@ -1007,7 +1107,7 @@ begin
                if (GPIO_ext_done = '1') then
                   if (acc_save = ACCESS_32BIT and gpio_cart_addr = "00") then
                      gpio_cart_addr <= "01";
-                     GPIO_ext_din <= Dout_save(31 downto 16);
+                     gpio_write_data <= Dout_save(31 downto 16);
                      GPIO_ext_req <= '1';
                   else
                      mem_bus_done <= '1';

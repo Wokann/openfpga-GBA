@@ -5,12 +5,12 @@
       "platform_ids": [
         "gba"
       ],
-      "shortname": "GBA",
-      "description": "Game Boy Advance with RTC. Active development, check the README for more feature info.",
-      "author": "mincer_ray",
-      "url": "https://github.com/mincer-ray/openfpga-GBA",
+      "shortname": "mincer_ray-AGBLayered",
+      "description": "mincer_ray + Wokann: AI cart hardware passthrough/save reads",
+      "author": "mincer_ray + Wokann",
+      "url": "https://github.com/Wokann/openfpga-GBA",
       "version": "1.0.1",
-      "date_release": "2026-10-25"
+      "date_release": "2026-11-15"
     },
     "framework": {
       "target_product": "Analogue Pocket",

@@ -11,6 +11,8 @@ architecture test of tb_layered_memorymux is
     signal gb_on : std_logic := '0';
     signal cart_mode : std_logic := '1';
     signal hw_mode : std_logic := '1';
+    signal switch_hold : std_logic := '0';
+    signal switch_idle : std_logic;
     signal tilt_mode, save_sram : std_logic := '0';
     signal sram_events : natural := 0;
     signal ss : proc_bus_gb_type := ((others=>'0'), (others=>'Z'), (others=>'0'), '1', '0', 'Z', "10", "1111", '1');
@@ -67,6 +69,7 @@ begin
         EEPROM_ext_req=>ee_req, EEPROM_ext_rnw=>ee_rnw,
         EEPROM_ext_din=>ee_din, EEPROM_ext_dma=>ee_dma, EEPROM_ext_dout=>'1', EEPROM_ext_done=>ee_done,
         save_cart_mode=>cart_mode, gpio_cart_mode=>hw_mode, tilt_cart_mode=>tilt_mode,
+        cart_switch_hold=>switch_hold, cart_switch_idle=>switch_idle,
         tilt=>'0', AnalogTiltX=>(others=>'0'), AnalogTiltY=>(others=>'0'), debug_mem=>open
     );
     process(clk)
@@ -130,6 +133,15 @@ begin
                 if done='1' then completed:=true; exit; end if;
             end loop;
             assert completed report "memory access timeout at " & to_hstring(std_logic_vector(to_unsigned(a,32))) severity failure;
+        end procedure;
+        procedure ez_command(value : natural) is
+        begin
+            access_bus(16#09FE0000#,'0',16#D200#,ACCESS_16BIT);
+            access_bus(16#08000000#,'0',16#1500#,ACCESS_16BIT);
+            access_bus(16#08020000#,'0',16#D200#,ACCESS_16BIT);
+            access_bus(16#08040000#,'0',16#1500#,ACCESS_16BIT);
+            access_bus(16#09E20000#,'0',value,ACCESS_16BIT);
+            access_bus(16#09FC0000#,'0',16#1500#,ACCESS_16BIT);
         end procedure;
         variable n, e, r : natural;
         variable base_addr, reg_value, data_value, dir_value : natural;
@@ -334,6 +346,75 @@ begin
             end loop;
         end loop;
         report "PASS: 120 poisoned-result GPIO reads across widths, rotations and ROM windows";
+        -- EZ-only patches must drive the same GPIO route, preserving RTC bits.
+        special<='0';
+        access_bus(16#080000C4#,'0',16#00050007#,ACCESS_32BIT);
+        access_bus(16#080000C8#,'0',1,ACCESS_8BIT);
+        e:=g_requests;
+        access_bus(16#08001000#,'0',2,ACCESS_8BIT);
+        access_bus(16#09E20000#,'0',7,ACCESS_16BIT);
+        access_bus(16#09FC0000#,'0',16#1500#,ACCESS_16BIT);
+        assert g_requests=e report "unlocked EZ motor write was accepted" severity failure;
+        -- Corrupt one unlock value; no translation should escape.
+        access_bus(16#09FE0000#,'0',16#D200#,ACCESS_16BIT);
+        access_bus(16#08000000#,'0',16#1501#,ACCESS_16BIT);
+        access_bus(16#08020000#,'0',16#D200#,ACCESS_16BIT);
+        access_bus(16#08040000#,'0',16#1500#,ACCESS_16BIT);
+        access_bus(16#09E20000#,'0',7,ACCESS_16BIT);
+        access_bus(16#09FC0000#,'0',16#1500#,ACCESS_16BIT);
+        assert g_requests=e report "broken EZ sequence triggered rumble" severity failure;
+        for strength in 0 to 2 loop
+            ez_command(2**(strength+1)-1); -- 3-in-1: 1 / 3 / 7
+            assert g_regs(0)=x"000F" and g_regs(1)=x"000D" and g_regs(2)=x"0001"
+                report "EZ 3-in-1 rumble changed RTC pins/control" severity failure;
+            ez_command(8);
+            assert g_regs(0)=x"0007" and g_regs(1)=x"000D" report "EZ stop failed" severity failure;
+        end loop;
+        for strength in 16#F0# to 16#F2# loop
+            e:=g_requests;ez_command(strength);
+            assert g_requests=e report "EZODE strength setup started motor" severity failure;
+            access_bus(16#08001000#,'0',2,ACCESS_8BIT);
+            assert g_regs(0)=x"000F" and g_regs(1)=x"000D" severity failure;
+            access_bus(16#08001000#,'0',0,ACCESS_16BIT);
+            assert g_regs(0)=x"0007" severity failure;
+            access_bus(16#08001000#,'0',2,ACCESS_32BIT);
+            assert g_regs(0)=x"000F" and g_regs(2)=x"0001" severity failure;
+        end loop;
+        -- Native GPIO remains authoritative, and its next RTC values are retained.
+        access_bus(16#080000C4#,'0',16#00010006#,ACCESS_32BIT);
+        access_bus(16#08001000#,'0',0,ACCESS_8BIT);
+        assert g_regs(0)=x"0006" and g_regs(1)=x"0009" severity failure;
+        hw_mode<='0';wait until falling_edge(clk);wait until falling_edge(clk);
+        e:=g_requests;ez_command(7);access_bus(16#08001000#,'0',2,ACCESS_8BIT);
+        assert g_requests=e report "EZ translation ran outside passthrough" severity failure;
+        hw_mode<='1';wait until falling_edge(clk);wait until falling_edge(clk);
+        access_bus(16#08001000#,'0',2,ACCESS_8BIT);
+        assert g_requests=e report "EZODE enable survived route reprobe" severity failure;
+        report "PASS: EZ 3-in-1 / EZODE -> GPIO, widths, unlock validation, RTC preservation, Off isolation";
+        -- A switch request must let an already-issued transfer finish.
+        wait until falling_edge(clk);
+        adr<=x"080000C4";rnw<='1';acc<=ACCESS_32BIT;ena<='1';
+        wait until falling_edge(clk);ena<='0';
+        wait until g_req='1';
+        wait until falling_edge(clk);switch_hold<='1';
+        assert switch_idle='0' report "switch acknowledged an active GPIO word" severity failure;
+        wait until done='1';wait until falling_edge(clk);
+        assert switch_idle='1' report "completed GPIO did not drain" severity failure;
+        e:=g_requests;n:=local_writes;
+        -- Capture a request while held, then dispatch it on the new route.
+        adr<=x"080000C6";rnw<='0';acc<=ACCESS_8BIT;wdata<=x"00000008";ena<='1';
+        wait until falling_edge(clk);ena<='0';
+        for i in 0 to 15 loop
+            wait until falling_edge(clk);
+            assert done='0' and g_requests=e and local_writes=n and switch_idle='1'
+                report "held request escaped before route switch" severity failure;
+        end loop;
+        hw_mode<='0';special<='1';switch_hold<='0';
+        wait until done='1';wait until falling_edge(clk);
+        wait until falling_edge(clk); -- observe the local GPIO write pulse
+        assert g_requests=e and local_writes=n+1
+            report "queued request was lost or sent on the old route" severity failure;
+        report "PASS: in-flight word drain + held request resumes on new route without reset";
         stop;
         wait;
     end process;

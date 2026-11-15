@@ -13,14 +13,19 @@ module cart_header_probe #(
     input wire rd_ready,
     input wire [31:0] rd_data,
     output reg done,
-    output reg present
+    output reg present,
+    output reg ds_present
 );
     localparam IDLE=0, ISSUE=1, WAIT_DATA=2, GAP=3, FINISH=4, COMPLETE=5;
     reg [2:0] state;
     reg [2:0] count;
     reg [31:0] words [0:3];
     reg [31:0] acc_or, acc_and;
-    reg header_matches;
+    reg header_matches, ds_address_match, ds_pullup_match;
+    // GBATEK DS Rumble Pak signature: AD1 low, other lines reflect the
+    // halfword address. Also accept pulled-up floating lines on this FPGA bus.
+    wire [15:0] ds_low = (16'h0058 + {13'd0, rd_addr, 1'b0}) & 16'hFFFD;
+    wire [15:0] ds_high = (16'h0059 + {13'd0, rd_addr, 1'b0}) & 16'hFFFD;
     localparam TIMER_BITS = TIMEOUT > 0 ? $clog2(TIMEOUT + 1) : 1;
     reg [TIMER_BITS-1:0] timer;
 
@@ -33,6 +38,9 @@ module cart_header_probe #(
             rd_addr <= 2'd0;
             done <= 0;
             present <= 0;
+            ds_present <= 0;
+            ds_address_match <= 1;
+            ds_pullup_match <= 1;
             header_matches <= 1;
             acc_or <= 0;
             acc_and <= 32'hFFFFFFFF;
@@ -48,6 +56,8 @@ module cart_header_probe #(
                 WAIT_DATA: begin
                     if (rd_ready) begin
                         acc_or <= acc_or | rd_data;
+                        if (rd_data != {ds_high, ds_low}) ds_address_match <= 0;
+                        if (rd_data != 32'hFFFDFFFD) ds_pullup_match <= 0;
                         acc_and <= acc_and & rd_data;
                         if (!count[2]) words[count[1:0]] <= rd_data;
                         else if (words[count[1:0]] != rd_data) header_matches <= 0;
@@ -66,7 +76,8 @@ module cart_header_probe #(
                 end
                 GAP: state <= ISSUE;
                 FINISH: begin
-                    present <= header_matches && acc_or != 0 && acc_and != 32'hFFFFFFFF;
+                    ds_present <= header_matches && (ds_address_match || ds_pullup_match);
+                    present <= header_matches && !ds_address_match && !ds_pullup_match && acc_or != 0 && acc_and != 32'hFFFFFFFF;
                     done <= 1;
                     state <= COMPLETE;
                 end

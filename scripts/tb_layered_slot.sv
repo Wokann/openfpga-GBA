@@ -2,6 +2,7 @@
 module tb_layered_slot;
     reg clk=0, clk74=0, reset_n=0, restart=0, cfg=1, hw_cfg=0, motor=0;
     reg tilt_game=0,phi_source=0;
+    reg switch_idle=1;
     always #5 clk=~clk;
     always #6.734 clk74=~clk74;
     always #120 phi_source=~phi_source;
@@ -20,7 +21,7 @@ module tb_layered_slot;
         .clk_sys(clk), .clk_74a(clk74), .pll_core_locked(reset_n),
         .core_reset_s(restart), .reset_n_s(1'b1), .dataslot_allcomplete_s(1'b1),
         .cfg(cfg), .hw_cfg(hw_cfg), .motor(motor), .save_req(save_req), .save_rnw(save_rnw),
-        .tilt_game(tilt_game), .phi_source(phi_source),
+        .tilt_game(tilt_game), .phi_source(phi_source), .switch_idle(switch_idle),
         .save_addr(save_addr), .save_din(save_din),
         .e_req(e_req), .e_rnw(e_rnw), .e_din(e_din), .e_dma(e_dma),
         .g_req(g_req), .g_rnw(g_rnw), .g_addr(g_addr), .g_din(g_din),
@@ -41,6 +42,7 @@ module tb_layered_slot;
     reg flash_mode=0, bank=0;
     integer flash_state=0, rumble_writes=0, save_writes=0, rom_reads=0, e_writes=0;
     reg header_present=1;
+    reg ds_card=0;
     reg [3:0] gpio_data=0,gpio_dir=0,gpio_input=0;
     reg gpio_enable=1; // warm cartridge: initialization must turn this off
     integer gpio_writes=0,gpio_reads=0;
@@ -70,7 +72,8 @@ module tb_layered_slot;
             end
         end
     end
-    wire [15:0] rom_word = (rom_addr==24'h62 && gpio_enable) ? {12'd0,gpio_pins} :
+    wire [15:0] rom_word = ds_card ? (rom_addr[15:0] & 16'hFFFD) :
+        (rom_addr==24'h62 && gpio_enable) ? {12'd0,gpio_pins} :
         (rom_addr==24'h63 && gpio_enable) ? {12'd0,gpio_dir} :
         (rom_addr==24'h64 && gpio_enable) ? 16'h0001 :
         header_present ? (rom_addr[15:0]^16'hA55A) : 16'hFFFF;
@@ -123,8 +126,11 @@ module tb_layered_slot;
     end
     // A grant must never cut a rumble/save strobe in half.
     reg previous_owner=0;
-    always @(negedge clk) if(reset_n && b0[7] !== dut.cart_phi)
-        $fatal(1,"PHI interrupted by bus ownership");
+    always @(negedge clk) begin
+        #1;
+        if(reset_n && b0[7] !== (dut.cart_hw_mode ? phi_source : 1'b0))
+            $fatal(1,"PHI interrupted by bus ownership");
+    end
     always @(posedge clk74) begin
         if(dut.cart_slot_owner!==previous_owner && reset_n) begin
             if(cs!==1'b1 || rd!==1'b1 || wr!==1'b1)
@@ -158,7 +164,7 @@ module tb_layered_slot;
             wait(dut.cart_gpio_done);#1;
             if(reading && dut.cart_gpio_dout!==expected)
                 $fatal(1,"GPIO %d: got %h expected %h",addr,dut.cart_gpio_dout,expected);
-            if(!cs || !rd || !wr) $fatal(1,"GPIO completed before physical strobes ended");
+            if(dut.cart_hw_mode && (!cs || !rd || !wr)) $fatal(1,"GPIO completed before physical strobes ended");
             @(negedge clk);
         end
     endtask
@@ -167,7 +173,7 @@ module tb_layered_slot;
     reg [3:0] expected_pins;
     initial begin
         repeat(5) @(negedge clk); reset_n=1;
-        wait(dut.cart_probe_done);#1;
+        wait(dut.cart_boot_done);#1;
         if(!dut.layered_save_mode || rom_reads!=16) $fatal(1,"valid header not detected");
         wait(dut.cart_gpio_initialized);#1;
         if(gpio_enable || dut.cart_gpio_readable || gpio_writes!=1 || rumble_writes!=0)
@@ -293,6 +299,56 @@ module tb_layered_slot;
         if(dut.layered_save_mode || dut.cart_gpio_initialized) $fatal(1,"empty cart did not fall back");
         before_rumble=rumble_writes;motor=1;dut.refresh_due=1;
         wait(rumble_writes>before_rumble);
+        // Live off/on reprobes a DS option pak without any game reset.
+        motor=0;hw_cfg=0;
+        repeat(20) @(negedge clk);
+        wait(!dut.cart_switch_hold);
+        if(!dut.cart_boot_done || dut.cart_hw_mode) $fatal(1,"live off reset the game");
+        ds_card=1;hw_cfg=1;
+        repeat(20) @(negedge clk);
+        wait(!dut.cart_switch_hold);
+        if(!dut.cart_ds_mode || dut.cart_hw_mode || dut.layered_save_mode)
+            $fatal(1,"DS pak routed as GBA saves/GPIO");
+        before_gpio=gpio_writes;
+        gpio_access(0,2,1,0);gpio_access(0,1,8,0);gpio_access(0,0,8,0);
+        gpio_access(1,1,0,8);gpio_access(1,0,0,8);
+        wait(dut.sent_motor);
+        before_rumble=rumble_writes;dut.refresh_due=1;
+        wait(rumble_writes>=before_rumble+2);
+        if(!dut.cart_rumble || gpio_writes!=before_gpio || b0[7]!==0)
+            $fatal(1,"DS motor depended on local GPIO or used physical GPIO/PHI");
+        gpio_access(0,0,0,0);wait(!dut.sent_motor);
+        // Do not cut an upstream rumble pulse when switching off.
+        dut.refresh_due=1;wait(dut.wr_busy && dut.wr_cnt==65);hw_cfg=0;
+        repeat(20) @(negedge clk);wait(!dut.cart_switch_hold);
+        if(dut.cart_ds_mode || !dut.cart_boot_done) $fatal(1,"DS live disable failed");
+        // Delay acknowledgement to represent a busy CPU/DMA memory access.
+        ds_card=0;header_present=1;switch_idle=0;j=rom_reads;hw_cfg=1;
+        repeat(200) @(negedge clk);
+        if(!dut.cart_switch_hold || rom_reads!=j || !dut.cart_boot_done)
+            $fatal(1,"reprobe did not wait for the memory request");
+        switch_idle=1;wait(dut.cart_hw_mode && !dut.cart_switch_hold);
+        if(dut.cart_ds_mode || dut.layered_save_mode) $fatal(1,"live GBA route failed");
+        // A pending physical GPIO write must complete on the old route.
+        @(negedge clk);g_addr=0;g_din=8;g_rnw=0;g_req=1;switch_idle=0;
+        @(negedge clk);g_req=0;hw_cfg=0;
+        wait(dut.cart_gpio_done);#1;
+        if(!dut.cart_hw_mode || gpio_data!=8) $fatal(1,"live toggle lost GPIO write");
+        switch_idle=1;wait(!dut.cart_switch_hold);
+        if(dut.cart_hw_mode || !dut.cart_boot_done) $fatal(1,"live GPIO disable reset game");
+        // A second menu change during probing is applied after draining it.
+        ds_card=1;hw_cfg=1;
+        wait(dut.cart_route_state==dut.CART_PROBE);hw_cfg=0;
+        repeat(20) @(negedge clk);wait(!dut.cart_switch_hold);
+        if(dut.cart_hw_mode || dut.cart_ds_mode || !dut.cart_boot_done)
+            $fatal(1,"toggle during probe left the wrong active route");
+        // Saves force hardware on, but a DS pak must never receive save traffic.
+        cfg=1;restart=1;
+        repeat(20) @(negedge clk);restart=0;
+        wait(dut.cart_boot_done);#1;
+        if(!dut.cart_ds_mode || dut.cart_hw_mode || dut.layered_save_mode)
+            $fatal(1,"DS pak with forced hardware enabled physical saves");
+        $display("PASS: DS GPIO adapter + live switching + drain before reprobe + no game reset");
         $display("PASS: raw 4-bit GPIO + RTC serial read + save coexistence + no periodic rumble + fallback");
         $finish;
     end

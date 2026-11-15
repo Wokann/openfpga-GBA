@@ -1,0 +1,9 @@
+mincer_ray-AGBLayered
+
+Original Pocket port by mincer_ray, based on GBA_MiSTer by its contributors.
+Wokann: AI-generated cartridge hardware passthrough and cartridge save reading/writing features.
+
+SD ROMs can use GBA cartridge hardware or a standard DS Rumble Pak, independently of cartridge saves. EZ rumble commands are translated to GPIO3. See LAYERED.md for supported protocols and setup.
+
+Report Layered issues to github.com/Wokann/openfpga-GBA, not the upstream MiSTer project.
+Licensed under GPL-2.0.
