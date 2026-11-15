@@ -5,9 +5,9 @@
       "platform_ids": [
         "gba"
       ],
-      "shortname": "mincer_ray-AGBLayered",
+      "shortname": "AGBLayered",
       "description": "mincer_ray + Wokann: AI cart hardware passthrough/save reads",
-      "author": "mincer_ray + Wokann",
+      "author": "mincer_ray",
       "url": "https://github.com/Wokann/openfpga-GBA",
       "version": "1.0.1",
       "date_release": "2026-11-15"
